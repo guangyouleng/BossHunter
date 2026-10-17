@@ -145,6 +145,8 @@ class WindowsPackagingTests(TestCase):
             with patch.object(launcher, 'port_free', return_value=True), patch.object(launcher, 'find_chrome', return_value=Path('chrome.exe')), patch.object(launcher, 'node_path', return_value=Mock(is_file=lambda: True)), patch.object(launcher, 'WindowsJob', return_value=job), patch.object(launcher.subprocess, 'CREATE_NO_WINDOW', 0, create=True), patch.object(launcher.subprocess, 'Popen', side_effect=processes) as spawn, patch.object(controller, 'wait_ready') as ready, patch.object(controller.cancel, 'wait', return_value=False), patch.object(launcher, 'open_dashboard') as opened:
                 controller.start()
                 self.assertEqual(spawn.call_count, 4)
+                chrome_args = spawn.call_args_list[0].args[0]
+                self.assertEqual(chrome_args[-1], 'https://www.zhipin.com/')
                 self.assertEqual(job.assign.call_count, 4)
                 self.assertEqual(ready.call_count, 3)
                 self.assertEqual(controller.processes, processes)

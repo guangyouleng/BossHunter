@@ -258,7 +258,7 @@ class Controller:
                 self.job = WindowsJob()
                 self.spawn([str(chrome), f'--remote-debugging-port={chrome_port}',
                                       '--remote-debugging-address=127.0.0.1', f'--user-data-dir={profile}',
-                                      '--no-first-run', '--no-default-browser-check', 'https://www.zhipin.com/web/chat/index'],
+                                      '--no-first-run', '--no-default-browser-check', 'https://www.zhipin.com/'],
                            'chrome', env, external=True)
                 self.wait_ready(f'http://127.0.0.1:{chrome_port}/json/version',
                                 lambda body: bool(json.loads(body).get('webSocketDebuggerUrl')))
@@ -400,7 +400,7 @@ def desktop():
     root = tk.Tk()
     root.title('BossHunter 启动器')
     root.geometry('600x300')
-    status = tk.StringVar(value='未启动。首次使用请先安装 Chrome，启动后登录 BOSS 并配置模型。')
+    status = tk.StringVar(value='未启动。首次使用请先安装 Chrome；启动后会打开 BOSS 官网，请人工登录。')
     ttk.Label(root, text='BossHunter 招聘助手', font=('', 18)).pack(pady=18)
     ttk.Label(root, textvariable=status, wraplength=550).pack(padx=20, pady=10)
     row = ttk.Frame(root)
@@ -453,7 +453,7 @@ def desktop():
             if closing:
                 root.destroy()
                 return
-            status.set(error or ('运行中。请在网页内完成配置；自动任务由网页开关控制。' if running else '后台服务及本次启动的独立 Chrome 已停止，可重新启动。'))
+            status.set(error or ('运行中。请在独立 Chrome 的 BOSS 官网人工登录，再进入招聘端沟通页或推荐牛人页；项目配置和自动任务由工作台控制。' if running else '后台服务及本次启动的独立 Chrome 已停止，可重新启动。'))
             start_button.configure(state='disabled' if running else 'normal')
             stop_button.configure(state='normal' if running else 'disabled')
         if running and not busy and any(p.poll() is not None for p in controller.processes):
