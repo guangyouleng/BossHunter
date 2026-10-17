@@ -1,5 +1,7 @@
 // Passive CDP observer. Never creates a platform socket or sends MQTT packets.
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+const pageRules = JSON.parse(readFileSync(new URL('../../data/recruiting_dom.json', import.meta.url), 'utf8'));
 const LIMIT = 2 * 1024 * 1024;
 function vint(b, p) {
   let n = 0n;
@@ -55,11 +57,18 @@ export function chatURL(value) {
   try { const u = new URL(value); return u.protocol === 'wss:' && (u.hostname === 'zhipin.com' || u.hostname.endsWith('.zhipin.com')) && u.pathname === '/chatws'; }
   catch { return false; }
 }
-export function securityURL(value) {
-  try { const u = new URL(value); return (u.hostname === 'zhipin.com' || u.hostname.endsWith('.zhipin.com')) &&
-    (['/web/passport/zp/verify.html', '/web/passport/zp/403.html'].includes(u.pathname) || (u.pathname === '/' && u.searchParams.has('_security_check'))); }
-  catch { return false; }
+export function pageKind(value) {
+  try {
+    const u = new URL(value);
+    if (!['https:', 'http:'].includes(u.protocol) || !(u.hostname === 'zhipin.com' || u.hostname.endsWith('.zhipin.com'))) return '';
+    const path = u.pathname.replace(/\/+$/, '') || '/';
+    if (pageRules.security_paths.includes(path) || (path === '/' && u.searchParams.has('_security_check'))) return 'verification_required';
+    return pageRules.login_paths.includes(path) ? 'login_required' : '';
+  } catch { return ''; }
 }
+export function securityURL(value) { return pageKind(value) === 'verification_required'; }
+function restrictedURL(value) { return !!pageKind(value); }
+
 export class ChatObserver {
   constructor() { this.epoch = randomUUID(); this.states = new Map(); }
   state(session) {
@@ -72,15 +81,15 @@ export class ChatObserver {
     if (!msg.sessionId || !this.states.has(msg.sessionId)) return;
     const s = this.state(msg.sessionId), p = msg.params || {};
     if (msg.method === 'Page.frameNavigated' && !p.frame?.parentId) {
-      s.sockets.clear(); s.generation++; s.paused = securityURL(p.frame?.url);
+      s.sockets.clear(); s.generation++; s.paused = restrictedURL(p.frame?.url);
     }
     if (msg.method === 'Network.responseReceived') {
       const r = p.response || {}; let u;
       try { u = new URL(r.url); } catch { return; }
-      if (securityURL(r.url) || ((u.hostname === 'zhipin.com' || u.hostname.endsWith('.zhipin.com')) &&
+      if (restrictedURL(r.url) || ((u.hostname === 'zhipin.com' || u.hostname.endsWith('.zhipin.com')) &&
         [403, 429].includes(r.status) && (p.type === 'Document' || u.pathname.startsWith('/wapi/')))) s.paused = true;
     }
-    if (msg.method === 'Network.requestWillBeSent' && (securityURL(p.request?.url) || securityURL(p.redirectResponse?.url))) s.paused = true;
+    if (msg.method === 'Network.requestWillBeSent' && (restrictedURL(p.request?.url) || restrictedURL(p.redirectResponse?.url))) s.paused = true;
     if (msg.method === 'Network.webSocketCreated' && chatURL(p.url)) {
       s.sockets.clear(); s.generation++;
       s.reason = '已捕获 BOSS WS 连接，等待数据确认；使用 HTTP 轮询';

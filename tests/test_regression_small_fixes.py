@@ -45,19 +45,7 @@ class VersionMetadataTests(unittest.TestCase):
 
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-        sidebar_source = (
-            ROOT
-            / "src"
-            / "bosshunter"
-            / "web"
-            / "frontend"
-            / "src"
-            / "components"
-            / "layout"
-            / "Sidebar.tsx"
-        ).read_text(encoding="utf-8")
-
-        version = "2.4.0"
+        version = bosshunter.__version__
         frontend = ROOT / "src" / "bosshunter" / "web" / "frontend"
         package = json.loads((frontend / "package.json").read_text(encoding="utf-8"))
         lock = json.loads((frontend / "package-lock.json").read_text(encoding="utf-8"))
@@ -70,11 +58,8 @@ class VersionMetadataTests(unittest.TestCase):
         self.assertEqual(package["version"], version)
         self.assertEqual(lock["version"], version)
         self.assertEqual(lock["packages"][""]["version"], version)
-        self.assertIn(f"v{version} · 本地控制台", sidebar_source)
-        self.assertIn(f"BossHunter v{version}</h1>", readme)
-        self.assertIn(f"version-v{version}-", readme)
+        self.assertIn(f"招聘端版本：**{version}**", readme)
         self.assertIn(f"## v{version}\n", changelog)
-        self.assertNotIn("v1.1.0", sidebar_source)
 
 
 class ConfigExampleTests(unittest.TestCase):

@@ -1,5 +1,6 @@
 """Recommend-page patchright automation: greet, select job, read candidates."""
 import tempfile
+import json
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -18,7 +19,21 @@ class Frame:
         self._result = result
 
     def evaluate(self, js):
+        if 'item.click(); return true' in js:
+            self._selected_job = json.loads(js.split("getAttribute('value')===", 1)[1].split(');', 1)[0])
+            return self._result in (True, 'selected')
         return self._result
+
+    def evaluate_handle(self, js):
+        tracker = Mock()
+        def evaluate(script):
+            if 'item.click(); return true' in script:
+                self._selected_job = json.loads(script.split("getAttribute('value')===", 1)[1].split(');', 1)[0])
+                return self._result in (True, 'selected')
+            return {'job_id':getattr(self, '_selected_job', 'old'), 'ready':True,
+                    'changed':hasattr(self, '_selected_job'), 'revision':1}
+        tracker.evaluate.side_effect = evaluate
+        return tracker
 
 
 class Page:
@@ -30,6 +45,9 @@ class Page:
         self.target_id = target_id
         self.reload_calls = 0
         self.listeners = {}
+
+    def evaluate(self, script):
+        return ''
 
     def on(self, event, callback):
         self.listeners[event] = callback
@@ -255,6 +273,29 @@ class GreetDiscoveredTests(unittest.TestCase):
         service.jobs.save_budget("custom", 100)
         return service
 
+    def test_stop_after_click_keeps_greeting_uncertain(self):
+        from bosshunter.recruiting.browser import TaskCancelled
+        frame = GreetFrame(FRAME_URL, job_id='encryptJob123')
+        verifier = RecommendVerifier(lambda:{}, cdp_url='http://127.0.0.1:9222')
+        service = self.service(verifier)
+        original = frame.evaluate
+        def evaluate(script):
+            value = original(script)
+            if 'btn.click()' in script:
+                service.discovery_stop.set()
+            return value
+        frame.evaluate = Mock(side_effect=evaluate)
+        runtime = SyncPlaywright(PW(Browser(Context([Page(RECOMMEND_PAGE,[frame])]))))
+        with patch('bosshunter.recruiting.recommend.sync_playwright',return_value=runtime), \
+             patch.object(service,'_count_request'):
+            with self.assertRaises(BrowserError) as caught:
+                service.greet_discovered('geek123', '', 'encryptJob123')
+        self.assertNotIsInstance(caught.exception,TaskCancelled)
+        self.assertEqual(caught.exception.code,'greeting_uncertain')
+        with service.store.db() as db:
+            self.assertEqual(db.execute('SELECT status FROM greeting_attempts').fetchone()[0],'uncertain')
+        self.assertTrue(any('待核实' in reason for reason in service.jobs.state()['blockers']))
+
     def test_records_attempt_with_boss_job_id(self):
         service = self.service(FakeGreetVerifier({"sent": True, "job_id": "encryptJob123", "reason": "已发出"}))
         result = service.greet_discovered("geek123", "", "encryptJob123")
@@ -286,7 +327,13 @@ class SelectAndReadTests(unittest.TestCase):
     def _verifier(self, evaluate_result):
         frame = Mock()
         frame.url = "https://www.zhipin.com/web/frame/recommend/"
-        frame.evaluate.return_value = evaluate_result
+        frame.evaluate.return_value = evaluate_result if not isinstance(evaluate_result, str) else evaluate_result == 'selected'
+        tracker = Mock()
+        tracker.evaluate.return_value = {'job_id':'job1','ready':True,'changed':True,'revision':1}
+        from itertools import chain, repeat
+        states = chain([{'job_id':'old'}], repeat(tracker.evaluate.return_value))
+        tracker.evaluate.side_effect = lambda script: True if 'item.click(); return true' in script else next(states)
+        frame.evaluate_handle.return_value = tracker
         pw = PW(Browser(Context([Page(RECOMMEND_PAGE, [frame])])))
         verifier = RecommendVerifier(lambda: {}, cdp_url="http://127.0.0.1:9222")
         return verifier, SyncPlaywright(pw)

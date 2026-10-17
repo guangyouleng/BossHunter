@@ -15,6 +15,7 @@ from .jobs import RecruitingJobs
 from .local_session import LocalBossSession
 from .ws_monitor import HybridMonitor
 from .pacing import FIELDS as PACING_FIELDS, RANGES as PACING_RANGES, pacing_values
+from .operations import BrowserCoordinator
 from bosshunter.browser.client import RuntimeClient
 from bosshunter.throttle import PageThrottle
 from bosshunter.ai.credentials import get_ai_base_url, get_ai_service
@@ -27,6 +28,7 @@ QUOTA_TTL_SECONDS = 300
 class RecruitingService:
     def __init__(self, path, config_provider, browser=None, local_session=None, verifier=None):
         self.store = Store(path)
+        self.browser_coordinator = BrowserCoordinator(self.store)
         self.jobs = RecruitingJobs(self.store)
         self.config_provider = config_provider
         # Saved pacing edits take effect only after this process restarts.
@@ -42,6 +44,13 @@ class RecruitingService:
             page_delay_max=cfg.get("read_page_delay_max", 30.0),
             request_counter=self._count_request, account_pause_handler=self._pause_platform_requests)
         self.verifier = verifier
+        if isinstance(self.local_session, LocalBossSession):
+            self.local_session.diagnostic_handler = self.store.record_browser_failure
+        if isinstance(self.browser, BossBrowser):
+            self.browser.operation_scope = self.browser_coordinator.operation
+            self.browser.diagnostic_handler = self.store.record_browser_failure
+            self.browser.account_pause_handler = self._pause_platform_requests
+        self._configure_verifier()
         self.use_local_session = browser is None or local_session is not None
         self.lock = RLock()
         self.discovery_worker = None
@@ -55,6 +64,26 @@ class RecruitingService:
         self.store.recover_outbox()
         self._reply_progress_local = local()
         self.ws_monitor = HybridMonitor(self.store)
+
+    def _configure_verifier(self):
+        from .recommend import RecommendVerifier
+        if isinstance(self.verifier, RecommendVerifier):
+            self.verifier.operation_scope = self.browser_coordinator.operation
+            self.verifier.diagnostic_handler = self.store.record_browser_failure
+            self.verifier.cancel_check = self._check_browser_cancelled
+
+    def _check_browser_cancelled(self):
+        self._check_stopped()
+        if self.discovery_stop.is_set():
+            raise TaskCancelled('主动招呼已停止，未提交后续浏览器操作')
+
+    def _browser_operation_state(self):
+        with self.store.db() as db:
+            row = db.execute("SELECT value FROM settings WHERE key='browser_operation'").fetchone()
+            state = json.loads(row[0]) if row else {}
+            if state.get('status') == 'running' and not self.store.task_active(db, 'browser-dom'):
+                state = {**state, 'status': 'interrupted'}
+            return state
 
     def _recruiting_cfg(self):
         config = self.config_provider() or {}
@@ -221,6 +250,8 @@ class RecruitingService:
                 "auto_send": {"daily_limit": s.setting('auto_reply_daily_limit', self._recruiting_cfg().get("auto_reply_daily_limit", 5)),
                               "sent_today": reply_budget['sent'], 'reserved_today': reply_budget['reserved']},
                 "request_budget": request_budget,
+                'browser_operation': self._browser_operation_state(),
+                'browser_diagnostics': settings.get('browser_diagnostics', []),
                 "pacing": self.pacing_state(),
                 'contact_sync': s.setting('contact_sync', {}),
                 "model_ready": bool(model_basis[1]),
@@ -388,6 +419,7 @@ class RecruitingService:
             self.verifier = RecommendVerifier(self.config_provider, cookie_loader=self.local_session.cookie_loader,
                                               account_pause_handler=self._pause_platform_requests)
         from .recommend import RecommendVerifier
+        self._configure_verifier()
         if isinstance(self.verifier, RecommendVerifier):
             self._count_request('greeting')
             self._refresh_quota_if_needed()
@@ -471,6 +503,7 @@ class RecruitingService:
             self.verifier = RecommendVerifier(self.config_provider, cookie_loader=self.local_session.cookie_loader,
                                               account_pause_handler=self._pause_platform_requests)
         throttle = PageThrottle(delay_min=throttle_delay[0], delay_max=throttle_delay[1])
+        self._configure_verifier()
         greeted = 0
         # 每轮先刷新推荐页拿新候选人；刷新会把岗位重置为默认第一个，下面逐岗重新 select_job
         try:
@@ -503,12 +536,16 @@ class RecruitingService:
                     self._count_request('recommend_load')
                     if self.discovery_stop.is_set():
                         raise TaskCancelled('主动招呼已停止')
-                self.verifier.select_job(job['platform_id'])
-                candidates = self.verifier.read_candidates()
+                with self.browser_coordinator.operation('切换岗位并读取推荐列表'):
+                    self.verifier.select_job(job['platform_id'])
+                    candidates = (self.verifier.read_candidates(expected_job_id=job['platform_id'])
+                                  if isinstance(self.verifier, RecommendVerifier) else self.verifier.read_candidates())
             except AccountPauseError:
                 raise
             except BrowserError as exc:
                 self.store.event('discovery_error', job['platform_id'], str(exc))
+                if exc.code == 'browser_busy':
+                    raise
                 continue
             per_job = random.randint(per_job_min, per_job_max)
             done = 0
@@ -1200,42 +1237,47 @@ class RecruitingService:
             if updated["context_hash"] != draft["context_hash"]:
                 raise ValueError("会话有新消息，已停止发送")
             if isinstance(self.browser, BossBrowser):
-                self._reply_stage('verifying_account', '核实发送账号')
-                self._count_request('identity')
-                self.browser.verify_account(c['id'], json.loads(c['snapshot']).get('account_uid'), on_refusal=self._pause_platform_requests)
-            self._send_guard(ident, auto)
-            self.store.claim(ident, auto=auto, daily_limit=self._recruiting_cfg().get('auto_reply_daily_limit', 5))
-            try:
-                self._send_guard(ident, auto, claimed=True)
-                self._reply_stage('sending', '正在提交发送，请勿重复发送')
+                self._count_request('identity')  # Pacing may wait minutes; acquire no DOM lease yet.
+            with self.browser_coordinator.operation('核对并提交会话操作'):
                 if isinstance(self.browser, BossBrowser):
-                    self.browser.execute(draft['kind'], before, draft['content'], preflight=lambda: self._send_guard(ident, auto, claimed=True))
-                else:
-                    self.browser.execute(draft["kind"], before, draft["content"])
-                # Give the page a short bounded render interval, never click twice.
-                time.sleep(.5)
-                after = self.browser.read_current()
-                if after["id"] != c["id"] or after["position_title"] != before["position_title"]:
-                    raise BrowserError("发送后会话身份不一致")
-                before_matches = sum(m["direction"] == "out" and m["kind"] == "text" and m["text"] == draft["content"] for m in before["messages"])
-                after_matches = sum(m["direction"] == "out" and m["kind"] == "text" and m["text"] == draft["content"] for m in after["messages"])
-                confirmed = draft["kind"] == "reply" and after_matches == before_matches+1 and after["editor_empty"]
-                # Card submissions require a separate proven platform result, never just click success.
-                status = "sent" if confirmed else "uncertain"
-                message = "页面出现一条对应的本人消息；不代表对方已读" if confirmed else "已尝试操作，需核对平台结果；不会自动重试"
-                self.store.finish(ident, status, message)
-                self._reply_stage(status, '已确认发送成功' if status == 'sent' else '发送结果待核实，请先检查 BOSS')
-                if not self.use_local_session:
-                    self.store.import_conversation(after)
-            except TaskCancelled:
-                self.store.finish(ident, 'cancelled', '发送前任务已停止，未提交后续点击')
-                raise
-            except Exception:
-                self.store.finish(ident, "uncertain", "操作结果待核实；请查看 Chrome，禁止盲目重试")
-                self.store.event("outbound_uncertain", ident, "执行中断，未自动重试")
-                raise BrowserError("操作结果待核实；请检查 Chrome，已阻止再次发送")
-            self.store.event("outbound_" + status, ident, message)
-            return self.store.row("outbox", ident)
+                    self._reply_stage('verifying_account', '核实发送账号')
+                    self.browser.verify_account(c['id'], json.loads(c['snapshot']).get('account_uid'), on_refusal=self._pause_platform_requests)
+                self._send_guard(ident, auto)
+                self.store.claim(ident, auto=auto, daily_limit=self._recruiting_cfg().get('auto_reply_daily_limit', 5))
+                try:
+                    self._send_guard(ident, auto, claimed=True)
+                    self._reply_stage('sending', '正在提交发送，请勿重复发送')
+                    if isinstance(self.browser, BossBrowser):
+                        self.browser.execute(draft['kind'], before, draft['content'], preflight=lambda: self._send_guard(ident, auto, claimed=True))
+                    else:
+                        self.browser.execute(draft["kind"], before, draft["content"])
+                    # Give the page a short bounded render interval, never click twice.
+                    time.sleep(.5)
+                    after = self.browser.read_current()
+                    if after["id"] != c["id"] or after["position_title"] != before["position_title"]:
+                        raise BrowserError("发送后会话身份不一致")
+                    before_matches = sum(m["direction"] == "out" and m["kind"] == "text" and m["text"] == draft["content"] for m in before["messages"])
+                    after_matches = sum(m["direction"] == "out" and m["kind"] == "text" and m["text"] == draft["content"] for m in after["messages"])
+                    confirmed = draft["kind"] == "reply" and after_matches == before_matches+1 and after["editor_empty"]
+                    # Card submissions require a separate proven platform result, never just click success.
+                    status = "sent" if confirmed else "uncertain"
+                    message = "页面出现一条对应的本人消息；不代表对方已读" if confirmed else "已尝试操作，需核对平台结果；不会自动重试"
+                    self.store.finish(ident, status, message)
+                    self._reply_stage(status, '已确认发送成功' if status == 'sent' else '发送结果待核实，请先检查 BOSS')
+                    if not self.use_local_session:
+                        self.store.import_conversation(after)
+                except TaskCancelled:
+                    self.store.finish(ident, 'cancelled', '发送前任务已停止，未提交后续点击')
+                    raise
+                except Exception as exc:
+                    if isinstance(exc, BrowserError):
+                        self.store.record_browser_failure(exc)
+                    self.store.finish(ident, "uncertain", "操作结果待核实；请查看 Chrome，禁止盲目重试")
+                    self.store.event("outbound_uncertain", ident, "执行中断，未自动重试")
+                    raise BrowserError("操作结果待核实；请检查 Chrome，已阻止再次发送", code="outbound_uncertain",
+                                       stage=getattr(exc, "stage", "核实发送结果"), diagnostics=getattr(exc, "diagnostics", {})) from exc
+                self.store.event("outbound_" + status, ident, message)
+                return self.store.row("outbox", ident)
 
     def _send_guard(self, ident, auto=False, *, claimed=False):
         self._check_stopped()
@@ -1416,6 +1458,9 @@ class RecruitingService:
         try:
             target = self.browser.bound_target()
             result = self.browser.runtime.recruiting_ws(target, self.ws_monitor.cursor)
+        except AccountPauseError as exc:
+            self.store.record_browser_failure(exc)
+            raise
         except BrowserError as exc:
             result = {'connected': False, 'reason': str(exc)[:250]}
             # bound_target deliberately rejects a page that navigated away from

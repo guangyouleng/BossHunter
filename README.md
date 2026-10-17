@@ -5,6 +5,8 @@
 
 <h1 align="center">BossHunter 招聘助手</h1>
 
+当前招聘端版本：**2.4.2** · 本地试运行。浏览器状态核验与诊断说明见 [招聘端浏览器操作](docs/RECRUITING_BROWSER.md)。
+
 <p align="center">
   面向招聘方的面试前工作 Agent：围绕岗位找人、候选人沟通、简历评估和面试安排，减少重复操作。
 </p>

@@ -282,7 +282,7 @@ class RequestPacingTests(unittest.TestCase):
         for header, expected in [('60', 1800), ('3600', 3600), ('invalid', 1800)]:
             with self.subTest(header=header):
                 with self.assertRaises(AccountPauseError):
-                    session._check_response(httpx.Response(429, headers={'Retry-After': header}))
+                    session._check_response(httpx.Response(429, headers={'Retry-After': header}, request=httpx.Request('GET','https://www.zhipin.com/wapi/test')))
                 pause.assert_called_with(expected)
 
     def test_other_instance_refusal_blocks_final_send_guard(self):

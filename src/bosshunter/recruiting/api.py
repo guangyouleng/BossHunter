@@ -92,9 +92,15 @@ def register(app, data_dir, config, respond):
         except AccountPauseError as exc:
             s.set_monitor_enabled(False)
             s.stop_discovery()
-            return respond({"error": str(exc), "code": "account_paused"}, 409)
+            s.store.record_browser_failure(exc)
+            return respond({"error": str(exc), "code": "account_paused", 'reason_code':exc.code,
+                            'diagnostic_id':exc.diagnostic_id, 'stage':exc.stage,
+                            'diagnostics':exc.diagnostics}, 409)
         except BrowserError as exc:
-            return respond({"error": str(exc), "code": "browser_unavailable"}, 409)
+            s.store.record_browser_failure(exc)
+            return respond({"error": str(exc), "code": "browser_unavailable", 'reason_code':exc.code,
+                            'diagnostic_id':exc.diagnostic_id, 'stage':exc.stage,
+                            'diagnostics':exc.diagnostics}, 409)
         except AIRequestError as exc:
             return respond({"error": exc.user_message, "code": exc.kind}, 502)
         except Exception:

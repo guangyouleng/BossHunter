@@ -194,14 +194,29 @@ class Store:
         with self.db() as db:
             db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (key, encode(value)))
 
+    def record_browser_failure(self, exc):
+        """Bounded, redacted history shared by Web and worker; no arbitrary payloads."""
+        from .errors import safe_diagnostics
+        if exc.diagnostic_id:
+            return
+        entry = {'id': uuid4().hex, 'code': exc.code, 'stage': exc.stage or '页面操作',
+                 'created_at': now(), 'details': safe_diagnostics(exc.diagnostics)}
+        with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute("SELECT value FROM settings WHERE key='browser_diagnostics'").fetchone()
+            previous = json.loads(row[0]) if row else []
+            db.execute('INSERT OR REPLACE INTO settings VALUES (?,?)',
+                       ('browser_diagnostics', encode([entry, *previous][:20])))
+        exc.diagnostic_id = entry['id']
+
     @staticmethod
     def owner_alive(owner):
         try:
             pid = int(str(owner).split(':', 1)[0])
             if pid <= 0:
                 return False
-            os.kill(pid, 0)
-            return True
+            from .process_state import process_alive
+            return process_alive(pid)
         except PermissionError:
             return True
         except (ValueError, TypeError, ProcessLookupError):

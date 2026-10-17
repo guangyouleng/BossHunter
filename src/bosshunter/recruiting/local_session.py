@@ -159,18 +159,23 @@ class LocalBossSession:
             raise BrowserError("已请求停止，中断当前操作")
 
     def _check_response(self, response):
+        from .page_state import page_url_kind
         refused = response.status_code in {403, 429}
-        security = False
-        if not refused:
-            location = response.headers.get('location', '')
-            security = platform_security_url(response.url) or (response.is_redirect and location
-                       and platform_security_url(urljoin(str(response.url), location)))
-        if refused or security:
+        location = response.headers.get('location', '')
+        issue = page_url_kind(response.url) or (page_url_kind(urljoin(str(response.url), location))
+                                               if response.is_redirect and location else '')
+        if refused or issue:
             seconds = refusal_cooldown(response.headers.get('Retry-After', ''))
             if self._account_pause_handler:
                 self._account_pause_handler(seconds)
-            message = 'BOSS 要求账号验证或访问受限' if security else 'BOSS 拒绝请求或触发限流'
-            raise AccountPauseError(message + '，已停止本次操作，请在 Chrome 核实账号；不自动重试')
+            message = ('BOSS 登录已失效' if issue == 'login_required' else
+                       'BOSS 要求账号验证或访问受限' if issue else 'BOSS 拒绝请求或触发限流')
+            exc = AccountPauseError(message + '，已停止本次操作，请在 Chrome 核实账号；不自动重试',
+                code=issue or 'platform_restricted', stage='后台 HTTP 读取',
+                diagnostics={'http_status':response.status_code,'page_url':str(response.url)})
+            if getattr(self, 'diagnostic_handler', None):
+                self.diagnostic_handler(exc)
+            raise exc
         response.raise_for_status()
 
     def read_conversation(self, ident, name, position_title, expected_account=None, *, include_attachments=False, throttle=True, since_mid=None):
