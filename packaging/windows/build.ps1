@@ -93,7 +93,7 @@ try {
 
     Push-Location $Root
     try {
-        Run $BuildPython @($Support, '--pyinstaller', '--noconfirm', '--clean', '--distpath', $Output, '--workpath', (Join-Path $Work 'pyinstaller'), (Join-Path $PSScriptRoot 'BossHunter.spec'))
+        Run $BuildPython @($Support, '--pyinstaller-log', (Join-Path $Work 'pyinstaller.log'), '--noconfirm', '--clean', '--distpath', $Output, '--workpath', (Join-Path $Work 'pyinstaller'), (Join-Path $PSScriptRoot 'BossHunter.spec'))
     } finally { Pop-Location }
     $Exe = Join-Path $Output 'BossHunter\BossHunter.exe'
     Run $BuildPython @($Support, '--verify-bundle', (Join-Path $Output 'BossHunter'))
@@ -122,5 +122,6 @@ try {
     Write-Host 'Next: double-click packaging\windows\installer.cmd (Inno Setup 6 required).'
 } catch {
     Write-Host ("BUILD FAILED: " + $_.Exception.Message) -ForegroundColor Red
+    Write-Host 'If PyInstaller failed, send .build\windows\pyinstaller.log (full stdout, stderr and exception chain).'
     exit 1
 } finally { Stop-Transcript | Out-Null }

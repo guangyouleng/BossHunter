@@ -307,6 +307,36 @@ def verify_bundle(folder):
     print(f'Verified {len(files)} executable/native files: all x64.')
 
 
+def run_logged_command(command, log_path):
+    """Capture native stdout/stderr independently of PowerShell transcripts."""
+    log_path = Path(log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f'Full build output: {log_path.resolve()}', flush=True)
+    with log_path.open('wb') as log:
+        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
+            try:
+                for line in process.stdout:
+                    # Keep original bytes even when the terminal cannot display them.
+                    log.write(line)
+                    log.flush()
+                    text = line.decode('utf-8', errors='replace')
+                    try:
+                        sys.stdout.write(text)
+                    except UnicodeEncodeError:
+                        sys.stdout.write(line.decode('ascii', errors='backslashreplace'))
+                    sys.stdout.flush()
+                return process.wait()
+            except BaseException:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                raise
+
+
 def main(arguments):
     if arguments == ['--probe']:
         probe_python()
@@ -320,6 +350,13 @@ def main(arguments):
         download_node(arguments[1], arguments[2])
     elif len(arguments) == 2 and arguments[0] == '--verify-bundle':
         verify_bundle(arguments[1])
+    elif len(arguments) >= 3 and arguments[0] == '--pyinstaller-log':
+        probe_python()
+        command = [sys.executable, '-u', '-X', 'utf8', str(Path(__file__).resolve()),
+                   '--pyinstaller', *arguments[2:]]
+        code = run_logged_command(command, arguments[1])
+        if code:
+            raise SystemExit(code)
     elif arguments and arguments[0] == '--pyinstaller':
         probe_python()
         # PyInstaller chooses its Windows bootloader using this environment
@@ -329,7 +366,7 @@ def main(arguments):
         sys.argv = ['pyinstaller'] + arguments[1:]
         runpy.run_module('PyInstaller', run_name='__main__')
     else:
-        raise ValueError('Expected --probe, --check-native, --stage-vc-runtime ARCHIVE DIR, --download-node WORK RESULT, --check-node-archive ARCHIVE DIR, --verify-bundle DIR or --pyinstaller ARGS.')
+        raise ValueError('Expected --probe, --check-native, --stage-vc-runtime ARCHIVE DIR, --download-node WORK RESULT, --check-node-archive ARCHIVE DIR, --verify-bundle DIR, --pyinstaller-log LOG ARGS or --pyinstaller ARGS.')
 
 
 if __name__ == '__main__':

@@ -39,7 +39,7 @@ Windows 11 ARM64 可作为构建主机，利用系统的 x64 应用兼容运行�
 
 成功产物：`dist\windows\BossHunter\BossHunter.exe`。**便携测试要复制整个 BossHunter 文件夹，不能只复制 exe。**
 
-构建日志：`.build\windows\build.log`；自检结果：`.build\windows\smoke-result.json`；自检运行日志：`.build\windows\smoke-result.log`。自检失败会显示具体错误；超过 5 分钟会停止该自检进程树并报告超时。构建失败后窗口会保留错误，修复网络或依赖问题后可以再次双击。依赖安装需要一定时间和磁盘空间；构建采用当前可解析的依赖版本，实际版本记录在构建日志中。
+构建日志：`.build\windows\build.log`；**PyInstaller 完整输出：`.build\windows\pyinstaller.log`**；自检结果：`.build\windows\smoke-result.json`；自检运行日志：`.build\windows\smoke-result.log`。PowerShell 5.1 的 transcript 可能漏掉原生命令输出，PyInstaller 由已验证的构建 Python 启动独立进程，将 stdout/stderr 合并后同时显示并写入专用日志，保留完整异常链和原始退出码。自检失败会显示具体错误；超过 5 分钟会停止该自检进程树并报告超时。构建失败后窗口会保留错误，修复网络或依赖问题后可以再次双击。依赖安装需要一定时间和磁盘空间；构建采用当前可解析的依赖版本，实际版本记录在构建日志中。
 
 Windows 自检包含后台线程的本机 COM/WMI 连接检查，确保 Cookie 读取库的 Windows 依赖已打包且能在线程中加载。此检查不读取浏览器 Cookie、不创建卷影副本，也不访问 BOSS；实际登录读取和数据库占用情况仍需安装后验证。
 
@@ -48,6 +48,8 @@ Windows 自检包含后台线程的本机 COM/WMI 连接检查，确保 Cookie �
 若 Node 解压时报 `CHANGELOG.md` 路径不存在或提示 ZIP 路径过长，请将完整源码重新解压到 `C:\BossHunter` 后构建。该顶层文件名不一定是最早失败的位置，应检查 ZIP 内深层 npm 文件的完整路径。更换源码目录时不要直接搬用旧 `.build\windows\venv`：Python 虚拟环境含绝对路径，应在新位置重新创建；无需重新安装系统 Python、C++ 运行库或 Inno Setup。[Windows 路径限制](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation)、[Python 虚拟环境可移植性说明](https://docs.python.org/3/library/venv.html#how-venvs-work)
 
 若提示 `Node archive SHA-256 mismatch`，只能确认实际下载内容与官方清单不一致，不能仅凭这一行判断具体网络或代理原因。更新整个 `packaging\windows` 文件夹后，在原源码目录重新运行 `build.cmd`，无需删除构建虚拟环境；新脚本会检查旧缓存、从确定的版本地址重新下载并有限重试。若三次仍失败，保留 `build.log` 中的版本、字节数、预期/实际哈希和错误信息。不要关闭校验或改用未经核实的压缩包。
+
+若提示 `Execution of 'update_exe_pe_checksum' failed - no more attempts left!`，该行仅表示 PyInstaller 更新 EXE 校验和的重试已耗尽；应提供 `pyinstaller.log` 中最初的失败原因及完整异常链，再区分计算校验和失败、文件写入/占用、权限或其他异常。仅凭汇总错误不能认定安全软件拦截，也不能认定是 ARM64 兼容问题；不跳过 PE 校验和或发布尚未通过自检的产物。
 
 ### PyMuPDF 报 `_extra` DLL 加载失败
 
