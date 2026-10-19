@@ -3,12 +3,17 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 import hashlib
 import json
 import os
+import re
 import runpy
 import struct
 import subprocess
 import sys
 import sysconfig
-from tempfile import TemporaryDirectory
+import time
+from tempfile import NamedTemporaryFile, TemporaryDirectory
+from urllib.error import URLError
+from urllib.request import Request, urlopen
+from http.client import HTTPException
 import zipfile
 
 
@@ -155,6 +160,111 @@ def probe_python():
     print(sys.executable)
 
 
+def download_build_file(url, destination, *, expected_sha256=None, label='Build file',
+                        max_bytes=None, deadline_seconds=600):
+    """Publish only complete downloads; hashed caches are never trusted by name."""
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if expected_sha256 is not None:
+        if not re.fullmatch(r'[a-fA-F0-9]{64}', expected_sha256):
+            raise ValueError('Invalid expected SHA-256.')
+        expected_sha256 = expected_sha256.lower()
+        if destination.is_file():
+            with destination.open('rb') as cached:
+                actual = hashlib.file_digest(cached, 'sha256').hexdigest()
+            if actual == expected_sha256:
+                print(f'{label}: verified cache {destination}', flush=True)
+                return destination
+            print(f'{label}: cached SHA-256 mismatch; downloading again '
+                  f'(expected={expected_sha256}, actual={actual}).', flush=True)
+    failure = None
+    for attempt in range(1, 4):
+        temporary = None
+        try:
+            print(f'{label}: download {attempt}/3 from {url} '
+                  f'(socket timeout 30s, transfer limit {deadline_seconds}s).', flush=True)
+            started = progress_at = time.monotonic()
+            received = 0
+            digest = hashlib.sha256()
+            with NamedTemporaryFile(dir=destination.parent, prefix=destination.name + '.',
+                                    suffix='.part', delete=False) as output:
+                temporary = Path(output.name)
+                request = Request(url, headers={'Cache-Control': 'no-cache',
+                                               'User-Agent': 'BossHunter-Windows-Builder'})
+                with urlopen(request, timeout=30) as response:
+                    if response.status != 200:
+                        raise ValueError(f'Unexpected HTTP status {response.status}.')
+                    raw_length = response.headers.get('Content-Length')
+                    total = int(raw_length) if raw_length is not None else None
+                    if total is not None and (total < 0 or (max_bytes is not None and total > max_bytes)):
+                        raise ValueError('Response Content-Length exceeds the allowed size.')
+                    while True:
+                        if time.monotonic() - started > deadline_seconds:
+                            raise TimeoutError('Download transfer time limit exceeded.')
+                        # read1 returns available data without waiting to fill a large buffer.
+                        chunk = response.read1(256 * 1024)
+                        if time.monotonic() - started > deadline_seconds:
+                            raise TimeoutError('Download transfer time limit exceeded.')
+                        if not chunk:
+                            break
+                        received += len(chunk)
+                        if max_bytes is not None and received > max_bytes:
+                            raise ValueError('Downloaded response exceeds the allowed size.')
+                        output.write(chunk)
+                        digest.update(chunk)
+                        now = time.monotonic()
+                        if now - progress_at >= 5:
+                            size = f'{received / 1048576:.1f} MiB'
+                            if total is not None:
+                                size += f' / {total / 1048576:.1f} MiB'
+                            print(f'{label}: {size}, {now - started:.0f}s elapsed.', flush=True)
+                            progress_at = now
+            if total is not None and received != total:
+                raise ValueError(f'Incomplete download: received {received} bytes, expected {total}.')
+            actual = digest.hexdigest()
+            if expected_sha256 is not None and actual != expected_sha256:
+                raise ValueError(f'SHA-256 mismatch: bytes={received}, '
+                                 f'expected={expected_sha256}, actual={actual}.')
+            temporary.replace(destination)
+            print(f'{label}: downloaded {received} bytes'
+                  f'{", SHA-256 verified" if expected_sha256 is not None else ""}: {destination}', flush=True)
+            return destination
+        except (OSError, URLError, HTTPException, ValueError) as error:
+            failure = error
+            print(f'{label}: attempt {attempt}/3 failed: {error}', flush=True)
+            if attempt < 3:
+                time.sleep(attempt)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+    raise RuntimeError(f'{label} failed after 3 attempts; build stopped: {failure}') from failure
+
+
+def node_archive_entry(checksums):
+    entries = re.findall(r'^([a-fA-F0-9]{64})\s+(node-(v22\.\d+\.\d+)-win-x64\.zip)\s*$',
+                         checksums, flags=re.MULTILINE)
+    if len(entries) != 1:
+        raise ValueError('Cannot identify one official Node 22 Windows x64 archive in SHASUMS256.txt.')
+    digest, name, version = entries[0]
+    return digest.lower(), name, version
+
+
+def download_node(work, result):
+    work, result = Path(work), Path(result)
+    # A failed invocation must not leave a successful result from an older build.
+    result.unlink(missing_ok=True)
+    sums = download_build_file('https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt',
+                               work / 'SHASUMS256.txt', label='Node checksum list',
+                               max_bytes=1024 * 1024, deadline_seconds=60)
+    digest, name, version = node_archive_entry(sums.read_text(encoding='utf-8'))
+    print(f'Node selected: {version} Windows x64; expected SHA-256={digest}', flush=True)
+    # Pin the URL to the version from the list: latest-v22.x may advance mid-build.
+    archive = download_build_file(f'https://nodejs.org/dist/{version}/{name}', work / name,
+                                  expected_sha256=digest, label='Node archive')
+    result.write_text(json.dumps({'archive': str(archive.resolve()),
+                                  'folder': str(archive.with_suffix('').resolve())}), encoding='utf-8')
+
+
 def check_node_archive(archive, destination):
     """Check actual ZIP members against PowerShell 5.1's legacy path limits.
 
@@ -206,6 +316,8 @@ def main(arguments):
         stage_vc_runtime(arguments[1], arguments[2])
     elif len(arguments) == 3 and arguments[0] == '--check-node-archive':
         check_node_archive(arguments[1], arguments[2])
+    elif len(arguments) == 3 and arguments[0] == '--download-node':
+        download_node(arguments[1], arguments[2])
     elif len(arguments) == 2 and arguments[0] == '--verify-bundle':
         verify_bundle(arguments[1])
     elif arguments and arguments[0] == '--pyinstaller':
@@ -217,7 +329,7 @@ def main(arguments):
         sys.argv = ['pyinstaller'] + arguments[1:]
         runpy.run_module('PyInstaller', run_name='__main__')
     else:
-        raise ValueError('Expected --probe, --check-native, --stage-vc-runtime ARCHIVE DIR, --check-node-archive ARCHIVE DIR, --verify-bundle DIR or --pyinstaller ARGS.')
+        raise ValueError('Expected --probe, --check-native, --stage-vc-runtime ARCHIVE DIR, --download-node WORK RESULT, --check-node-archive ARCHIVE DIR, --verify-bundle DIR or --pyinstaller ARGS.')
 
 
 if __name__ == '__main__':

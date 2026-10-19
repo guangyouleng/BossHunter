@@ -62,19 +62,16 @@ try {
     $env:BOSSHUNTER_BUILD_VC_RUNTIME = $VcRuntime
 
     # Use the official Node 22 x64 distribution and verify its SHA-256.
-    $Sums = Join-Path $Work 'SHASUMS256.txt'
-    Invoke-WebRequest -UseBasicParsing 'https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt' -OutFile $Sums
-    $Match = [regex]::Match((Get-Content $Sums -Raw), '(?m)^([a-fA-F0-9]{64})\s+(node-v22\.[0-9]+\.[0-9]+-win-x64\.zip)\s*$')
-    if (-not $Match.Success) { throw 'Cannot identify the official Node 22 Windows x64 archive.' }
-    $Archive = Join-Path $Work $Match.Groups[2].Value
-    if (-not (Test-Path $Archive) -or (Get-FileHash $Archive -Algorithm SHA256).Hash -ne $Match.Groups[1].Value) {
-        Invoke-WebRequest -UseBasicParsing ("https://nodejs.org/dist/latest-v22.x/" + $Match.Groups[2].Value) -OutFile $Archive
-    }
-    if ((Get-FileHash $Archive -Algorithm SHA256).Hash -ne $Match.Groups[1].Value) { throw 'Node archive SHA-256 mismatch.' }
-    $NodeFolder = Join-Path $Work ([IO.Path]::GetFileNameWithoutExtension($Archive))
+    $NodeResult = Join-Path $Work 'node-download.json'
+    Run $BuildPython @($Support, '--download-node', $Work, $NodeResult)
+    $NodeDownload = Get-Content $NodeResult -Raw -Encoding UTF8 | ConvertFrom-Json
+    $Archive = [string]$NodeDownload.archive
+    $NodeFolder = [string]$NodeDownload.folder
     # Deep npm paths can exceed MAX_PATH even if CHANGELOG.md itself is short.
     Run $BuildPython @($Support, '--check-node-archive', $Archive, $Work)
+    Write-Host "Extracting verified Node archive: $Archive"
     Expand-Archive -LiteralPath $Archive -DestinationPath $Work -Force
+    Write-Host "Node extraction complete: $NodeFolder"
     $env:PATH = "$NodeFolder;$env:PATH"
     $env:BOSSHUNTER_BUILD_NODE = $NodeFolder
     Run (Join-Path $NodeFolder 'node.exe') @('--version')

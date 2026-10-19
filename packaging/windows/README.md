@@ -29,7 +29,7 @@ Windows 11 ARM64 可作为构建主机，利用系统的 x64 应用兼容运行�
 
 - 在项目 `.build\windows\venv` 中创建隔离构建环境，先安装 PyInstaller 和时区数据。
 - 下载并校验固定版本的微软 x64 CRT 组件，在 `.build\windows\vc-runtime` 中准备发布运行库；已下载且 SHA-256 正确的包会复用。
-- 从 Node.js 官方下载 Node 22 Windows x64，并与官方 SHA-256 清单比对。
+- 从 Node.js 官方获取 Node 22 校验清单，再按清单中的具体版本下载 Windows x64 压缩包，避免两个请求之间 `latest-v22.x` 指向变化。已有包逐次核实 SHA-256；下载写入临时文件，完整性校验通过后才替换缓存。每次请求设置 30 秒套接字超时，清单/压缩包传输限时分别为 60/600 秒，失败最多尝试 3 次；输出下载阶段、进度及失败原因，校验不通过不解压、不打包。
 - 使用下载包中的 npm 执行 `npm ci` 和前端生产构建。
 - 确认前端 `dist\index.html` 生成后，再安装项目及招聘、OCR、PDF 可选依赖。源码压缩包不含 dist，不能先安装项目，否则 Hatchling 会报 `Forced include not found`。
 - 打包前在构建虚拟环境中分别验证 PyMuPDF 的 PDF 创建、读取和渲染，以及 RapidOCR 的模型加载和推理；每项限时 120 秒。导入失败或原生崩溃会立即停止并保留错误，避免打包到最后才发现构建环境缺 DLL。
@@ -46,6 +46,8 @@ Windows 自检包含后台线程的本机 COM/WMI 连接检查，确保 Cookie �
 自检还通过本进程核对 Windows 创建时间：相同进程号与创建时间应匹配，创建时间不同则不能视为同一任务归属。新任务、浏览器租约及外发占用均保留此标识，避免进程号复用后旧任务无法恢复；中断外发只转为“待核实”，不会自动重发。查询权限不足时保守保留占用；旧版本仅带进程号的记录继续兼容原有存活判断。这里使用只读查询权限，不终止其他软件进程。[微软 GetProcessTimes 说明](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes)
 
 若 Node 解压时报 `CHANGELOG.md` 路径不存在或提示 ZIP 路径过长，请将完整源码重新解压到 `C:\BossHunter` 后构建。该顶层文件名不一定是最早失败的位置，应检查 ZIP 内深层 npm 文件的完整路径。更换源码目录时不要直接搬用旧 `.build\windows\venv`：Python 虚拟环境含绝对路径，应在新位置重新创建；无需重新安装系统 Python、C++ 运行库或 Inno Setup。[Windows 路径限制](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation)、[Python 虚拟环境可移植性说明](https://docs.python.org/3/library/venv.html#how-venvs-work)
+
+若提示 `Node archive SHA-256 mismatch`，只能确认实际下载内容与官方清单不一致，不能仅凭这一行判断具体网络或代理原因。更新整个 `packaging\windows` 文件夹后，在原源码目录重新运行 `build.cmd`，无需删除构建虚拟环境；新脚本会检查旧缓存、从确定的版本地址重新下载并有限重试。若三次仍失败，保留 `build.log` 中的版本、字节数、预期/实际哈希和错误信息。不要关闭校验或改用未经核实的压缩包。
 
 ### PyMuPDF 报 `_extra` DLL 加载失败
 
