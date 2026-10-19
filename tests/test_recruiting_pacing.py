@@ -232,6 +232,74 @@ class RequestPacingTests(unittest.TestCase):
                             session.read_friend_jobs(['123'])
                     self.assertEqual(len(calls), 1)
 
+    def test_http_200_business_rejection_pauses_all_readers_without_retry(self):
+        for operation in ('conversation', 'jobs', 'quota', 'friend'):
+            with self.subTest(operation=operation):
+                calls, pause, diagnostics = [], Mock(), Mock()
+                session = LocalBossSession(lambda: CookieJar(), httpx.MockTransport(
+                    lambda r: calls.append(r) or httpx.Response(200, json={'code':37, 'message':'synthetic-private-response'})),
+                    account_pause_handler=pause)
+                session.diagnostic_handler = diagnostics
+                with self.assertRaises(AccountPauseError) as caught:
+                    if operation == 'conversation':
+                        session.read_conversation('123-0', '测试候选人', '测试岗位')
+                    elif operation == 'jobs':
+                        session.read_jobs()
+                    elif operation == 'quota':
+                        session.read_greeting_quota()
+                    else:
+                        session.read_friend_jobs(['123', '456'])
+                self.assertEqual(len(calls), 1)
+                pause.assert_called_once_with(1800)
+                diagnostics.assert_called_once_with(caught.exception)
+                self.assertNotIn('synthetic-private-response', str(caught.exception))
+
+    def test_business_rejection_blocks_another_process_send_guard(self):
+        sender = self.service()
+        authorize(sender)
+        c = sender.import_current()
+        draft = sender.prepare_reply(c['id'], '合成普通回复')
+        sender.store.claim(draft['id'])
+        reader = self.service()
+        reader.set_monitor_enabled(True)
+        session = LocalBossSession(lambda: CookieJar(), httpx.MockTransport(
+            lambda _: httpx.Response(200, json={'code':37})), account_pause_handler=reader._pause_platform_requests)
+        with self.assertRaises(AccountPauseError):
+            session.read_greeting_quota()
+        self.assertFalse(sender.store.setting('monitor_enabled'))
+        with self.assertRaises(TaskCancelled):
+            sender._send_guard(draft['id'], claimed=True)
+        self.assertEqual(sender.browser.calls, 0)
+
+    def test_discovery_stop_cancels_quota_pacing_before_the_http_request(self):
+        from threading import Thread
+        service=self.service()
+        calls, errors=[], []
+        session=LocalBossSession(lambda: CookieJar(), httpx.MockTransport(
+            lambda req: calls.append(req) or httpx.Response(200,json={'code':37})), request_counter=service._count_request)
+        service.local_session=session
+        def read():
+            try:
+                service.read_greeting_quota()
+            except Exception as exc:
+                errors.append(exc)
+        worker=Thread(target=read)
+        service.discovery_worker=worker
+        with patch.object(service.store, 'count_request', side_effect=[RequestThrottled(1),None]), patch.object(session, '_wait_cancelled', side_effect=lambda _:service.stop_discovery()):
+            worker.start();worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(calls, [])
+        self.assertEqual(len(errors),1)
+        self.assertIsInstance(errors[0],TaskCancelled)
+
+    def test_browser_identity_business_rejection_establishes_cooldown(self):
+        browser = BossBrowser(runtime=Mock())
+        browser.evaluate = Mock(return_value={'account_verified':False})
+        pause = Mock()
+        with self.assertRaises(AccountPauseError):
+            browser.verify_account('123-0', '456', on_refusal=pause)
+        pause.assert_called_once_with(1800)
+
     def test_account_pause_does_not_continue_discovery_at_next_job(self):
         service = self.service()
         authorize(service)

@@ -4,7 +4,7 @@ from copy import deepcopy
 import json
 import random
 import time
-from threading import Event, RLock, Thread, local
+from threading import Event, RLock, Thread, current_thread, local
 from uuid import uuid4
 
 from . import agent
@@ -16,14 +16,10 @@ from .local_session import LocalBossSession
 from .ws_monitor import HybridMonitor
 from .pacing import FIELDS as PACING_FIELDS, RANGES as PACING_RANGES, pacing_values
 from .operations import BrowserCoordinator
+from .browser_backends.common import confirmation_text
 from bosshunter.browser.client import RuntimeClient
 from bosshunter.throttle import PageThrottle
 from bosshunter.ai.credentials import get_ai_base_url, get_ai_service
-
-# 平台额度缓存有效期（秒）：超过视为过期，主动打招呼循环里重新读取，以覆盖
-# 「人工直接在 BOSS 打招呼」导致平台剩余变化、本地缓存失真的情况。
-QUOTA_TTL_SECONDS = 300
-
 
 class RecruitingService:
     def __init__(self, path, config_provider, browser=None, local_session=None, verifier=None):
@@ -34,10 +30,12 @@ class RecruitingService:
         # Saved pacing edits take effect only after this process restarts.
         self._startup_pacing = pacing_values(config_provider() or {})
         self.browser = browser or BossBrowser(runtime=RuntimeClient(config_provider()),
-                                              target_id=config_provider().get("browser", {}).get("recruiting_target_id"))
+                                              target_id=config_provider().get("browser", {}).get("recruiting_target_id"),
+                                              config_provider=config_provider)
         cfg = self._recruiting_cfg()
         self.local_session = local_session or LocalBossSession(
             user_data_dir=config_provider().get("browser", {}).get("recruiting_user_data_dir"),
+            browser_kind=config_provider().get("browser", {}).get("recruiting_browser_kind", "chrome"),
             read_delay=(cfg.get("read_delay_min", 120.0), cfg.get("read_delay_max", 180.0)),
             daily_limit=cfg.get("read_daily_limit", 100),
             page_delay=cfg.get("read_page_delay", 15.0),
@@ -120,7 +118,7 @@ class RecruitingService:
         daily_limit = self.store.request_daily_limit(cfg.get('read_daily_limit', 100))
         while True:
             self._check_stopped()
-            if kind in {'greeting', 'recommend_load'} and self.discovery_stop.is_set():
+            if (kind in {'greeting', 'recommend_load'} or current_thread() is self.discovery_worker) and self.discovery_stop.is_set():
                 raise TaskCancelled('主动招呼已停止')
             try:
                 self.store.count_request(kind, daily_limit, min_interval=interval,
@@ -576,16 +574,23 @@ class RecruitingService:
         if self.discovery_worker and self.discovery_worker.is_alive():
             return {'running': True, 'message': '主动打招呼循环已在运行'}
         self.discovery_stop.clear()
-        self._refresh_quota_if_needed()
+        state = self.jobs.state()
+        # Stale quota can be refreshed by the worker. Other blockers still
+        # reject immediately; never hold the HTTP action through pacing waits.
+        if not state['can_start']:
+            raise ValueError('；'.join(state['blockers']))
         if self.discovery_stop.is_set():
             raise TaskCancelled('启动期间已请求停止，未启动主动招呼任务')
-        state = self.jobs.state()
-        if state['blockers']:
-            raise ValueError('；'.join(state['blockers']))
 
         def run():
             total = 0
             try:
+                self._refresh_quota_if_needed()
+                if self.discovery_stop.is_set():
+                    raise TaskCancelled('启动期间已请求停止，未执行主动招呼')
+                refreshed = self.jobs.state()
+                if refreshed['blockers']:
+                    raise ValueError('；'.join(refreshed['blockers']))
                 while not self.discovery_stop.is_set():
                     result = self.run_discovery(per_job_min, per_job_max)
                     total += result.get('greeted', 0)
@@ -1256,8 +1261,9 @@ class RecruitingService:
                     after = self.browser.read_current()
                     if after["id"] != c["id"] or after["position_title"] != before["position_title"]:
                         raise BrowserError("发送后会话身份不一致")
-                    before_matches = sum(m["direction"] == "out" and m["kind"] == "text" and m["text"] == draft["content"] for m in before["messages"])
-                    after_matches = sum(m["direction"] == "out" and m["kind"] == "text" and m["text"] == draft["content"] for m in after["messages"])
+                    expected_text = confirmation_text(draft['content'])
+                    before_matches = sum(m["direction"] == "out" and m["kind"] == "text" and confirmation_text(m["text"]) == expected_text for m in before["messages"])
+                    after_matches = sum(m["direction"] == "out" and m["kind"] == "text" and confirmation_text(m["text"]) == expected_text for m in after["messages"])
                     confirmed = draft["kind"] == "reply" and after_matches == before_matches+1 and after["editor_empty"]
                     # Card submissions require a separate proven platform result, never just click success.
                     status = "sent" if confirmed else "uncertain"

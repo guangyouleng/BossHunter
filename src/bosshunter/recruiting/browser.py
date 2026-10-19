@@ -4,11 +4,14 @@ No raw browser/JS endpoint is exposed by the recruiting API. Every write is an
 explicit action with a current conversation check. Invitation submission does
 not exist in this adapter.
 """
-from .dom import READ_CHAT, READ_CONTACT_LIST, SCROLL_CONTACT_LIST, render_dom
+from .dom import READ_CHAT, READ_CONTACT_LIST, render_dom
+from .browser_backends import load_backend
+from .browser_backends.common import reply_guard
 
 import json
 import re
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
@@ -29,9 +32,11 @@ def refusal_cooldown(retry_after):
         return 1800
 
 class BossBrowser:
-    def __init__(self, runtime=None, target_id=None):
+    def __init__(self, runtime=None, target_id=None, config_provider=None):
         self.runtime = runtime or RuntimeClient()
         self.target_id = target_id
+        self.config_provider = config_provider or (lambda: {})
+        self.inputs = load_backend(self.config_provider())
 
     @staticmethod
     def recruiter_target(target):
@@ -123,9 +128,9 @@ class BossBrowser:
             return JSON.stringify({account_verified:valid});
         }catch(e){return JSON.stringify({account_verified:false});}})();
         """))
-        if value.get('refusal_status') in {403, 429} and on_refusal:
-            on_refusal(refusal_cooldown(value.get('retry_after', '')))
         if value.get('account_verified') is not True:
+            if on_refusal:
+                on_refusal(refusal_cooldown(value.get('retry_after', '')))
             raise AccountPauseError('浏览器当前招聘账号与已绑定账号不一致或无法核实，停止外发')
 
     @browser_operation('核对当前会话')
@@ -154,12 +159,12 @@ class BossBrowser:
             for step in range(200):
                 if before_load:
                     before_load(step == 0)
-                value = self.evaluate(SCROLL_CONTACT_LIST)
+                value = self._scroll_contacts()
                 for contact in value.get('contacts', []):
                     if contact.get('ident'):
                         collected[contact['ident']] = contact
                 count = len(collected) if collected else value.get('count', 0)
-                if count == last:
+                if count == last and (not self.inputs.humanized or value.get('at_bottom') is True):
                     stable += 1
                     if stable >= 3:
                         reason = 'loaded_list_stable'
@@ -178,6 +183,44 @@ class BossBrowser:
                                  'reason': reason, 'loaded': len(collected),
                                  'note': '仅包含当前页面可加载的联系人，未证明覆盖全账号历史联系人'}
         return list(collected.values())
+
+    @browser_operation('滚动加载联系人')
+    def _scroll_contacts(self):
+        return self.inputs.scroll_contacts(self)
+
+    @contextmanager
+    def _input_page(self):
+        # Shared exact-target discovery and page risk checks; providers only
+        # implement input. Import locally to avoid the verifier/adapter cycle.
+        from .recommend import RecommendVerifier
+        target = self.bound_target()
+        verifier = RecommendVerifier(self.config_provider,
+            account_pause_handler=getattr(self, 'account_pause_handler', None))
+        verifier._target_id = target
+        verifier.cancel_check = getattr(self, 'cancel_check', None)
+        pw = self.inputs.start_driver()
+        try:
+            browser = pw.chromium.connect_over_cdp(verifier._find_cdp_url())
+            page = self.inputs.target_page(browser, target)
+            def require_chat_page():
+                if (not self.recruiter_target({'type':'page', 'targetId':target, 'url':page.url})
+                        or urlsplit(page.url).path != '/web/chat/index'):
+                    raise BrowserError('绑定页面已离开 BOSS 招聘端沟通页，停止操作；不会切换页面',
+                                       code='bound_page_changed', diagnostics={'page_url':page.url, 'target_bound':True})
+            if not page_url_kind(page.url):
+                require_chat_page()
+            with verifier._page_guard(page) as risk_check:
+                def check():
+                    # Known login/restriction pages must still reach the shared
+                    # pause handler; unknown origins must receive no DOM input.
+                    if not page_url_kind(page.url):
+                        require_chat_page()
+                    risk_check()
+                check()
+                yield page, check
+                check()
+        finally:
+            pw.stop()  # Disconnect only; keep the user's browser and tabs open.
 
     @browser_operation('读取岗位说明')
     def read_position(self, expected_title, expected_job_id):
@@ -204,36 +247,8 @@ class BossBrowser:
             raise BrowserError("动作不在执行白名单内")
         if kind == "reply":
             check_reply(content)
-        expected = json.dumps({k: before[k] for k in ("id", "position_title", "messages")}, ensure_ascii=False)
-        guard = READ_CHAT + render_dom("""
-            const expected=EXPECTED;
-            if(snapshot.id!==expected.id || snapshot.position_title!==expected.position_title || JSON.stringify(snapshot.messages)!==JSON.stringify(expected.messages)) throw Error('会话或消息已变化，已停止发送');
-            if(!snapshot.editor_empty) throw Error('编辑器中有人工输入，已停止自动操作');
-            const visible=e=>!!e && e.getClientRects().length>0 && getComputedStyle(e).visibility!=='hidden';
-            if([...document.querySelectorAll(__dom_active_dialog__)].some(visible)) throw Error('请先关闭当前弹窗');
-        """).replace("EXPECTED", expected)
-        if kind == "reply":
-            self.evaluate(guard + render_dom("""
-                const send=document.querySelector(__dom_send_button__);
-                if(!visible(send)) throw Error('找不到可见发送控件');
-                editor.focus(); editor.textContent=CONTENT;
-                editor.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:CONTENT}));
-                return JSON.stringify({prepared:true});
-            """).replace("CONTENT", json.dumps(content, ensure_ascii=False)))
-            # Separate browser turns allow the framework to update send-button state.
-            # Revalidate context and our exact text, allowing no intervening human edit.
-            typed_guard = guard.replace(
-                "if(!snapshot.editor_empty) throw Error('编辑器中有人工输入，已停止自动操作');",
-                "if(editor.innerText!==" + json.dumps(content, ensure_ascii=False) + ") throw Error('回复草稿已被修改，停止发送');",
-            )
-            if preflight:
-                preflight()
-            return self.evaluate(typed_guard + render_dom("""
-                const send=document.querySelector(__dom_send_ready__);
-                if(!visible(send)) throw Error('发送按钮尚未就绪；保留待核实状态');
-                send.click();
-                return JSON.stringify({attempted:true});
-            """))
+            return self.inputs.reply(self, before, content, preflight)
+        guard = reply_guard(before)
         if kind == "request_resume":
             self.evaluate(guard + render_dom("""
                 if(snapshot.messages.some(m=>/简历请求已发送|索取.*简历/.test(m.text))) throw Error('已有简历请求记录，请人工核对，避免重复索取');

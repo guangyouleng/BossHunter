@@ -91,7 +91,10 @@ async function getChromeVersion(port) {
 }
 
 async function discoverChromePort() {
-  for (const filePath of activePortFiles()) {
+  // Desktop launchers own one selected browser. Never discover an unrelated
+  // ordinary Chrome profile before trying that explicitly owned port.
+  const files = process.env.BOSSHUNTER_CHROME_PORT_STRICT === 'true' ? [] : activePortFiles();
+  for (const filePath of files) {
     try {
       const lines = fs.readFileSync(filePath, 'utf8').trim().split(/\r?\n/).filter(Boolean);
       const port = parseInt(lines[0], 10);

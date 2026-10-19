@@ -136,7 +136,7 @@ def greet(uid, frame, wait_timeout=0.05):
     page = Page(RECOMMEND_PAGE, [frame])
     pw = PW(Browser(Context([page])))
     verifier = RecommendVerifier(lambda: {}, cdp_url="http://127.0.0.1:9222", wait_timeout=wait_timeout)
-    with patch("bosshunter.recruiting.recommend.sync_playwright", return_value=SyncPlaywright(pw)):
+    with patch("bosshunter.recruiting.browser_backends.chrome.sync_playwright", return_value=SyncPlaywright(pw)):
         result = verifier.greet(uid)
     return result, pw, page
 
@@ -151,7 +151,7 @@ class GreetVerifierTests(unittest.TestCase):
         verifier = RecommendVerifier(lambda: {}, cdp_url="http://127.0.0.1:9222")
         from bosshunter.recruiting.browser import TaskCancelled
         guard = Mock(side_effect=TaskCancelled('停止'))
-        with patch('bosshunter.recruiting.recommend.sync_playwright', return_value=SyncPlaywright(pw)):
+        with patch('bosshunter.recruiting.browser_backends.chrome.sync_playwright', return_value=SyncPlaywright(pw)):
             with self.assertRaises(TaskCancelled):
                 verifier.greet('geek123', preflight=guard)
         self.assertFalse(any('btn.click()' in call.args[0] for call in frame.evaluate.call_args_list))
@@ -166,7 +166,7 @@ class GreetVerifierTests(unittest.TestCase):
         frame = GreetFrame(self.FRAME_URL, job_id=None)
         pw = PW(Browser(Context([Page(RECOMMEND_PAGE, [frame])])))
         verifier = RecommendVerifier(lambda: {}, cdp_url="http://127.0.0.1:9222")
-        with patch("bosshunter.recruiting.recommend.sync_playwright", return_value=SyncPlaywright(pw)):
+        with patch("bosshunter.recruiting.browser_backends.chrome.sync_playwright", return_value=SyncPlaywright(pw)):
             with self.assertRaisesRegex(BrowserError, "岗位"):
                 verifier.greet("geek123")
 
@@ -174,7 +174,7 @@ class GreetVerifierTests(unittest.TestCase):
         frame = GreetFrame(self.FRAME_URL, job_id="encryptJob123", click_result="missing")
         pw = PW(Browser(Context([Page(RECOMMEND_PAGE, [frame])])))
         verifier = RecommendVerifier(lambda: {}, cdp_url="http://127.0.0.1:9222")
-        with patch("bosshunter.recruiting.recommend.sync_playwright", return_value=SyncPlaywright(pw)):
+        with patch("bosshunter.recruiting.browser_backends.chrome.sync_playwright", return_value=SyncPlaywright(pw)):
             with self.assertRaisesRegex(BrowserError, "未找到"):
                 verifier.greet("geek123")
 
@@ -216,7 +216,7 @@ class GreetVerifierTests(unittest.TestCase):
         pw = PW(Browser(context))
         verifier = RecommendVerifier(lambda: {}, cdp_url='http://127.0.0.1:9222',
             cookie_loader=lambda: [SimpleNamespace(name='wt2', value='expected-synthetic-session')])
-        with patch('bosshunter.recruiting.recommend.sync_playwright', return_value=SyncPlaywright(pw)):
+        with patch('bosshunter.recruiting.browser_backends.chrome.sync_playwright', return_value=SyncPlaywright(pw)):
             with self.assertRaisesRegex(BrowserError, '登录账号'):
                 verifier.greet('candidate', 'test-job')
         frame.evaluate.assert_not_called()
@@ -226,7 +226,7 @@ class GreetVerifierTests(unittest.TestCase):
         frame = GreetFrame(self.FRAME_URL, job_id="encryptJob123", greet_text="请稍后重试")
         pw = PW(Browser(Context([Page(RECOMMEND_PAGE, [frame])])))
         verifier = RecommendVerifier(lambda: {}, cdp_url="http://127.0.0.1:9222", wait_timeout=0.01)
-        with patch("bosshunter.recruiting.recommend.sync_playwright", return_value=SyncPlaywright(pw)):
+        with patch("bosshunter.recruiting.browser_backends.chrome.sync_playwright", return_value=SyncPlaywright(pw)):
             result = verifier.greet("geek123")
         self.assertFalse(result["sent"])
 
@@ -236,7 +236,7 @@ class GreetVerifierTests(unittest.TestCase):
         page2 = Page(RECOMMEND_PAGE, [])
         pw = PW(Browser(Context([page1, page2])))
         verifier = RecommendVerifier(lambda: {}, cdp_url="http://127.0.0.1:9222")
-        with patch("bosshunter.recruiting.recommend.sync_playwright", return_value=SyncPlaywright(pw)):
+        with patch("bosshunter.recruiting.browser_backends.chrome.sync_playwright", return_value=SyncPlaywright(pw)):
             with self.assertRaisesRegex(BrowserError, "多个推荐页"):
                 verifier.greet("geek123")
 
@@ -245,7 +245,7 @@ class GreetVerifierTests(unittest.TestCase):
         frame = GreetFrame(self.FRAME_URL, job_id="encryptJob123")
         pw = PW(Browser(Context([Page(RECOMMEND_PAGE, [frame])])))
         verifier = RecommendVerifier(lambda: {}, cdp_url="http://127.0.0.1:9222")
-        with patch("bosshunter.recruiting.recommend.sync_playwright", return_value=SyncPlaywright(pw)):
+        with patch("bosshunter.recruiting.browser_backends.chrome.sync_playwright", return_value=SyncPlaywright(pw)):
             with self.assertRaisesRegex(BrowserError, "岗位不一致"):
                 verifier.greet("geek123", expected_job_id="different-job")
 
@@ -286,7 +286,7 @@ class GreetDiscoveredTests(unittest.TestCase):
             return value
         frame.evaluate = Mock(side_effect=evaluate)
         runtime = SyncPlaywright(PW(Browser(Context([Page(RECOMMEND_PAGE,[frame])]))))
-        with patch('bosshunter.recruiting.recommend.sync_playwright',return_value=runtime), \
+        with patch('bosshunter.recruiting.browser_backends.chrome.sync_playwright',return_value=runtime), \
              patch.object(service,'_count_request'):
             with self.assertRaises(BrowserError) as caught:
                 service.greet_discovered('geek123', '', 'encryptJob123')
@@ -340,13 +340,13 @@ class SelectAndReadTests(unittest.TestCase):
 
     def test_select_job_ok(self):
         verifier, spw = self._verifier("selected")
-        with patch("bosshunter.recruiting.recommend.sync_playwright", return_value=spw), \
+        with patch("bosshunter.recruiting.browser_backends.chrome.sync_playwright", return_value=spw), \
              patch("bosshunter.recruiting.recommend.time.sleep"):
             self.assertTrue(verifier.select_job("job1"))
 
     def test_select_job_missing_raises(self):
         verifier, spw = self._verifier("missing")
-        with patch("bosshunter.recruiting.recommend.sync_playwright", return_value=spw), \
+        with patch("bosshunter.recruiting.browser_backends.chrome.sync_playwright", return_value=spw), \
              patch("bosshunter.recruiting.recommend.time.sleep"):
             with self.assertRaisesRegex(BrowserError, "下拉框"):
                 verifier.select_job("job1")
@@ -354,7 +354,7 @@ class SelectAndReadTests(unittest.TestCase):
     def test_read_candidates(self):
         verifier, spw = self._verifier([{"name": "A", "uid": "geek1", "greetable": True},
                                         {"name": "B", "uid": "geek2", "greetable": False}])
-        with patch("bosshunter.recruiting.recommend.sync_playwright", return_value=spw):
+        with patch("bosshunter.recruiting.browser_backends.chrome.sync_playwright", return_value=spw):
             result = verifier.read_candidates()
         self.assertEqual(result, [{"name": "A", "uid": "geek1", "greetable": True},
                                   {"name": "B", "uid": "geek2", "greetable": False}])
@@ -365,7 +365,7 @@ class SelectAndReadTests(unittest.TestCase):
         page = Page(RECOMMEND_PAGE, [frame])
         pw = PW(Browser(Context([page])))
         verifier = RecommendVerifier(lambda: {}, cdp_url="http://127.0.0.1:9222")
-        with patch("bosshunter.recruiting.recommend.sync_playwright", return_value=SyncPlaywright(pw)), \
+        with patch("bosshunter.recruiting.browser_backends.chrome.sync_playwright", return_value=SyncPlaywright(pw)), \
              patch("bosshunter.recruiting.recommend.time.sleep"):
             self.assertTrue(verifier.reload())
         self.assertEqual(page.reload_calls, 1)
@@ -376,7 +376,7 @@ class SelectAndReadTests(unittest.TestCase):
         page.wait_for_timeout = Mock(side_effect=lambda _: page.frames.append(frame))
         pw = PW(Browser(Context([page])))
         verifier = RecommendVerifier(lambda: {}, cdp_url="http://127.0.0.1:9222")
-        with patch("bosshunter.recruiting.recommend.sync_playwright", return_value=SyncPlaywright(pw)):
+        with patch("bosshunter.recruiting.browser_backends.chrome.sync_playwright", return_value=SyncPlaywright(pw)):
             self.assertTrue(verifier.reload())
         page.wait_for_timeout.assert_called_once_with(500)
         self.assertEqual(page.reload_calls, 1)

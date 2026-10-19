@@ -9,9 +9,9 @@
 1. 安装 **Python 3.12 x64**：[官方 3.12.10 x64 安装包](https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe)。文件名中的 `amd64` 就是 Intel/AMD 使用的 x64；可以与已有 Python 3.10 并存。保留 pip、Python Launcher、Tcl/Tk 组件。脚本检查 Python 版本和位数；其他版本不会直接用于构建。
 2. 安装 **Inno Setup 6.3 或更新的 6.x**：<https://jrsoftware.org/isdl.php>。
 3. 安装或更新 **Microsoft Visual C++ v14 x64 运行库**：[微软官方下载](https://aka.ms/vc14/vc_redist.x64.exe)。Python 本身可启动，不代表 PDF/OCR 所需的 C++ DLL 齐全。Windows 11 ARM64 上运行 x64 Python 也使用此安装包。[微软说明](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
-4. 构建和测试需要联网；真机流程需要安装 **Google Chrome**。
+4. 构建和测试需要联网；真机流程需安装 **Google Chrome**，或自行从官方获取并完整解压 **CloakBrowser Windows x64**。
 
-构建电脑需要 Python、Inno Setup 和上述运行库。使用安装包的人不需要 Python、Conda、Node.js、npm 或 Inno Setup；仍需安装 Chrome。发布目录会携带经过架构校验的独立 x64 C++ 运行库，最终仍须通过下方的干净环境验收。
+构建电脑需要 Python、Inno Setup 和上述运行库。使用安装包的人不需要 Python、Conda、Node.js、npm 或 Inno Setup；需准备所选浏览器。发布目录会携带经过架构校验的独立 x64 C++ 运行库，最终仍须通过下方的干净环境验收。安装包不包含 CloakBrowser 二进制或其密钥。
 
 ### UTM / Windows 11 ARM64 构建
 
@@ -42,6 +42,8 @@ Windows 11 ARM64 可作为构建主机，利用系统的 x64 应用兼容运行�
 构建日志：`.build\windows\build.log`；自检结果：`.build\windows\smoke-result.json`；自检运行日志：`.build\windows\smoke-result.log`。自检失败会显示具体错误；超过 5 分钟会停止该自检进程树并报告超时。构建失败后窗口会保留错误，修复网络或依赖问题后可以再次双击。依赖安装需要一定时间和磁盘空间；构建采用当前可解析的依赖版本，实际版本记录在构建日志中。
 
 Windows 自检包含后台线程的本机 COM/WMI 连接检查，确保 Cookie 读取库的 Windows 依赖已打包且能在线程中加载。此检查不读取浏览器 Cookie、不创建卷影副本，也不访问 BOSS；实际登录读取和数据库占用情况仍需安装后验证。
+
+自检还通过本进程核对 Windows 创建时间：相同进程号与创建时间应匹配，创建时间不同则不能视为同一任务归属。新任务、浏览器租约及外发占用均保留此标识，避免进程号复用后旧任务无法恢复；中断外发只转为“待核实”，不会自动重发。查询权限不足时保守保留占用；旧版本仅带进程号的记录继续兼容原有存活判断。这里使用只读查询权限，不终止其他软件进程。[微软 GetProcessTimes 说明](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes)
 
 若 Node 解压时报 `CHANGELOG.md` 路径不存在或提示 ZIP 路径过长，请将完整源码重新解压到 `C:\BossHunter` 后构建。该顶层文件名不一定是最早失败的位置，应检查 ZIP 内深层 npm 文件的完整路径。更换源码目录时不要直接搬用旧 `.build\windows\venv`：Python 虚拟环境含绝对路径，应在新位置重新创建；无需重新安装系统 Python、C++ 运行库或 Inno Setup。[Windows 路径限制](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation)、[Python 虚拟环境可移植性说明](https://docs.python.org/3/library/venv.html#how-venvs-work)
 
@@ -77,11 +79,33 @@ Windows 自检包含后台线程的本机 COM/WMI 连接检查，确保 Cookie �
 
 ## 使用者操作
 
-1. 安装 Chrome，再运行安装包，无需管理员权限。
-2. 从开始菜单运行 BossHunter，点击“启动系统”。
-3. 启动器在独立 Chrome 中打开 BOSS 官网首页（`https://www.zhipin.com/`），并启动浏览器代理、Web 服务和 worker；服务就绪后打开项目招聘工作台。启动器不直接导航到需要登录的 BOSS 沟通或岗位列表页。
-4. 在独立 Chrome 中人工登录自己的 BOSS 账号，再人工进入招聘端沟通页；主动招呼需进入推荐牛人页。在项目网页配置模型、选择岗位并确认绑定会话。首次保存模型配置后停止系统再启动，让独立 worker 读取最新配置。自动任务仍由项目内的开关控制，安装或打开启动器不会自行开启任务；已有数据中开启的任务按原项目逻辑恢复。
-5. “停止系统”或关闭启动器会停止本次启动的服务和独立 Chrome，保留登录资料及数据库；普通 Chrome 不受影响。
+1. 准备 Chrome 或 CloakBrowser，再运行安装包，无需管理员权限。
+2. 从开始菜单运行 BossHunter，在“启动浏览器”中选择 **Google Chrome** 或 **CloakBrowser**。Chrome 会自动查找；CloakBrowser 需通过“选择文件”指定完整解压目录中的浏览器 `.exe`，不能选择压缩包、安装器或 Manager 程序。点击“启动系统”。
+3. 启动器在所选独立浏览器中打开 BOSS 官网首页（`https://www.zhipin.com/`），并启动浏览器代理、Web 服务和 worker；服务就绪后打开项目招聘工作台。启动器不直接导航到需要登录的 BOSS 沟通或岗位列表页。
+4. 在所选独立浏览器中人工登录自己的 BOSS 账号，再人工进入招聘端沟通页；主动招呼需进入推荐牛人页。在项目网页配置模型、选择岗位并确认绑定会话。首次保存模型配置后停止系统再启动，让独立 worker 读取最新配置。自动任务仍由项目内的开关控制，安装或打开启动器不会自行开启任务；已有数据中开启的任务按原项目逻辑恢复。
+5. 启动中、运行中和停止中不能改选浏览器。“停止系统”完成后可切换；下次打开启动器会记住上次选择及 CloakBrowser 路径。关闭启动器会停止本次启动的服务和独立浏览器，保留登录资料及数据库；其他浏览器窗口不受影响。
+
+### CloakBrowser 的下载与选择
+
+仅支持本机 **Windows x64** 浏览器文件。截至 2026-10-19，新版 Pro 的 GitHub Assets 只有校验文件和源码，不提供浏览器压缩包；最新浏览器按 [官方密钥及下载流程](https://cloakbrowser.dev/free/) 获取。无需密钥的旧版 v146 仍提供 [Windows x64 压缩包](https://github.com/CloakHQ/CloakBrowser/releases/download/chromium-v146.0.7680.177.5/cloakbrowser-windows-x64.zip)（[对应发布页](https://github.com/CloakHQ/CloakBrowser/releases/tag/chromium-v146.0.7680.177.5)）。完整解压后选择其中的 `chrome.exe`，保留同目录全部 DLL、资源和子目录；不要选择源码压缩包或 Manager。Windows 11 ARM64 虚拟机测试同样使用 x64 包，兼容性需实测，最终还需目标 x64 实体机验收。较新版本所需密钥由用户按官方流程配置；启动器不代办授权、不保存或显示密钥，也不自动下载浏览器。浏览器启动失败可查看 `logs/chrome.log`（该日志名兼容保留，记录当前所选浏览器）。
+
+默认 Chrome 资料目录为 `%LOCALAPPDATA%\BossHunter\chrome-profile`，CloakBrowser 为 `%LOCALAPPDATA%\BossHunter\cloakbrowser-profile`；已有自定义 Chrome 目录会保留，切回时恢复。两种浏览器不能共用同一资料目录，不复制 Cookie。切换需在对应浏览器重新登录同一招聘账号；原本地岗位、绑定会话和待核实记录保留，发送前账号核对仍生效。切换时清除旧浏览器标签页 ID，不自动打开或切换候选会话。
+
+CloakBrowser 原生启动使用官方文档描述的持久指纹种子，保存在独立资料目录的 `.cloakbrowser-seed`，重启复用；文件损坏会停止，不自动更换身份。[官方集成与持久资料说明](https://github.com/CloakHQ/CloakBrowser#framework-integrations)
+
+CloakBrowser 模式默认对**打招呼、岗位选择、联系人滚动加载及普通回复发送**使用拟人交互：鼠标沿曲线移动、点击前检查目标、通过滚轮分段滚动。回复逐字输入，使用短暂停顿，不模拟打错或删改；中文、emoji 和换行通过浏览器文本输入处理，不用 Enter 输入换行。输入期间出现人工改稿、焦点/光标或会话变化就停止，保留现有内容；最终核验后只点击一次发送。简历操作、WS/HTTP 监测和节流参数保持现状。Chrome 模式不加载此交互层。点击超时不补点、不改用 JS 点击；招呼结果不明仍保留待核实。岗位切换只接受实际点击之后的列表更新，联系人无法定位真实滚动区域时停止。
+
+Windows 安装包携带交互层及其 Playwright 驱动；不携带 CloakBrowser 浏览器二进制，也不调用交互层的浏览器启动/下载功能。源码运行需安装 `.[recruiting,cloakbrowser]` 依赖并将 `browser.recruiting_browser_kind` 设为 `cloakbrowser`，显式配置对应资料目录和调试端口；缺少依赖会报错停止。高级配置 `browser.cloakbrowser_humanize: false` 可在重启后关闭该浏览器的拟人交互（含回复输入和发送）。以上不构成 BOSS 兼容性或不会封禁的保证，真实 CloakBrowser/Windows/BOSS 仍需验收。
+
+Cookie 读取根据所选类型使用 Chrome 或 Chromium 读取器，并明确指定该资料目录的数据库及 Windows `Local State` 密钥；不会在失败时退回另一个浏览器。后台 HTTP 读取不依赖新建浏览器连接，原 WS/HTTP 监测调度未改。实际 CloakBrowser 的 Cookie 加密兼容性仍需在目标 Windows 版本验收；模拟测试只验证受支持格式的读取与目录隔离。
+
+启动完成后单独关闭独立浏览器，Web、代理及监测进程继续运行，WS 不可用时按原规则回退 HTTP 轮询（仍需 Cookie 有效，遵守节流及平台暂停状态）；此时无法执行页面点击或发送，不会自动重开浏览器。可通过启动器“停止系统”后重新启动恢复浏览器。代理、Web 或监测进程异常退出仍会清理整组进程；“停止系统”及退出启动器也会清理全部自有进程。
+
+启动期间关闭启动器会请求取消；启动入口、每次创建进程前及就绪响应返回后均检查取消状态，停止后续启动并清理已启动的自有进程。启动逻辑开始前已收到退出请求时，不创建新的配置和浏览器资料。
+
+本项目不分发 CloakBrowser 浏览器二进制，其使用和密钥受 [官方二进制许可](https://github.com/CloakHQ/CloakBrowser/blob/main/BINARY-LICENSE.md) 约束。
+
+安装版只连接本次启动的浏览器调试端口；代理不再优先发现普通 Chrome 的 `DevToolsActivePort`。该端口也同步给推荐页操作，所选浏览器不可用时停止，不改连其他实例。源码模式未设置严格端口标志时保留原自动发现行为。
 
 “请求统计”页可修改招聘端读取间隔、分页间隔、主动招呼间隔、每岗每轮人数和 HTTP 轮询间隔。点击“保存节流参数”后会列出改动并要求确认；取消会放弃本次编辑，不写配置。确认后保存，但正在运行的进程继续使用原节流参数，页面显示“待重启生效”。当前使用手动重启：退出 BossHunter 启动器后重新打开并启动系统；源码运行时需同时停止并重启 Web 和招聘监测进程。只重启 Web 而旧 worker 仍运行时，页面继续提示待重启。
 
@@ -95,11 +119,16 @@ Windows 登录状态读取使用同一个 Chrome 资料目录内的 `Default\Net
 
 ## Windows 验收清单
 
+- 分别选择 Chrome/CloakBrowser，检查记住选择、路径、各自登录资料和停止后切换；缺少 CloakBrowser、选错架构或目录时不能退回 Chrome。
+- 普通 Chrome 另有调试端口时，检查项目只连接启动器选定的实例；CloakBrowser 需单独验证真实 Cookie 解密、登录和完整业务流程。
 - 先运行构建产物，再安装打包产物；确认“启动、打开页面、查看日志、停止、再次启动”均正常。
 - 检查普通 Chrome 已打开时仍使用独立资料，停止后普通 Chrome 保持打开。
+- 单独关闭本次独立浏览器后，确认工作台和 worker 保持运行，并在 Cookie 有效时回退 HTTP 监测；再检查停止/重新启动可以恢复浏览器。代理、Web 或 worker 异常退出时仍需清理整组进程。
 - 检查模型配置、BOSS 登录 Cookie 读取、岗位与会话绑定、WS/HTTP 监测、简历读取和评分。跨系统后的 Cookie 读取尤其需要实测，打包自检不能代替平台验收。
 - 检查重复启动、端口冲突和缺少 Chrome 时显示明确原因，失败后没有遗留服务占用端口。
 - 检查退出或异常结束启动器后，后台及其子进程退出；检查重新启动后仍能读取已有配置和数据库。
+- 检查点击“启动系统”后立即关闭启动器，以及等待浏览器/服务就绪时关闭：取消后不继续启动后续进程，已经启动的自有进程应退出。
+- 检查主动招呼启动阶段等待额度时能停止；停止后不应再触发后续额度请求或招呼动作。业务拒绝码虽为 HTTP 200，也应进入共享暂停；账号未核实前不可继续外发。
 - 在未安装 Python/Node/Conda 的干净 Windows 用户环境测试；构建虚拟机本身已安装 Python，不能单凭它验证所有运行时都已打入包。
 - 升级或卸载重装后，用户配置和数据仍保留。
 

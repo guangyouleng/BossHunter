@@ -208,6 +208,8 @@ DEFAULTS: dict[str, Any] = {
         "enable_port_guard": True,
         "site_patterns": True,
         "recruiting_user_data_dir": "",
+        "recruiting_browser_kind": "chrome",
+        "cloakbrowser_humanize": True,
     },
     "recruiting": {
         "read_delay_min": 120.0,

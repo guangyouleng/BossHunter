@@ -1,14 +1,15 @@
-"""Patchright-backed candidate verification on the BOSS recommend page.
+"""Candidate verification and scoped input on the BOSS recommend page.
 
-Connects to the user's running Chrome over CDP — reusing their real login and
-fingerprint — to lower platform risk, then reloads the recommend page and reads
+Connects to the selected running browser over CDP, reusing its login,
+then reloads the recommend page and reads
 the fresh first candidate card. BOSS only refreshes the recommend list on a real
 browser reload, not on in-app page switches, so the reload is mandatory.
 
 Never creates, activates, closes, or switches tabs. Discovery reloads the bound
 recommend page; greeting clicks the authorized card and sends BOSS's default greeting.
 """
-from .dom import CLICK_GREET, READ_GREET_TEXT, READ_JOB_ID, WATCH_JOB_LIST, OPEN_JOB_MENU, PICK_JOB, READ_CANDIDATES
+from .dom import READ_GREET_TEXT, READ_JOB_ID, WATCH_JOB_LIST, READ_CANDIDATES
+from .browser_backends import load_backend
 
 import json
 import time
@@ -16,7 +17,6 @@ from contextlib import contextmanager
 from urllib.parse import urlparse, urljoin
 
 import httpx
-from patchright.sync_api import sync_playwright
 
 from .operations import browser_operation
 from .page_state import page_url_kind, page_issue_error, PAGE_STATUS
@@ -30,6 +30,7 @@ class RecommendVerifier:
     def __init__(self, config_provider, cdp_url=None, wait_timeout=15.0, cookie_loader=None,
                  account_pause_handler=None):
         self.config_provider = config_provider
+        self.inputs = load_backend(config_provider())
         self._cdp_url = cdp_url
         self._wait_timeout = wait_timeout
         self._target_id = self._bound_target_id()
@@ -47,7 +48,7 @@ class RecommendVerifier:
                 return
             security_page = page_url_kind(response.url)
             if not (parsed.path.startswith('/wapi/') or RECOMMEND_FRAME_PATH in parsed.path
-                    or parsed.path == '/web/chat/recommend' or security_page):
+                    or parsed.path in {'/web/chat/recommend', '/web/chat/index'} or security_page):
                 return
             headers = response.headers
             location = headers.get('location', '')
@@ -56,7 +57,7 @@ class RecommendVerifier:
                     or (300 <= response.status < 400 and verification)):
                 return
             if not failure:
-                failure.append(AccountPauseError('推荐页请求被拒绝、限流或要求验证；已暂停，请在 Chrome 核实账号',
+                failure.append(AccountPauseError('招聘页面请求被拒绝、限流或要求验证；已暂停，请在浏览器核实账号',
                     code=security_page or verification or 'platform_restricted',
                     diagnostics={'http_status':response.status,'page_url':response.url}))
                 if self._account_pause_handler:
@@ -215,6 +216,15 @@ class RecommendVerifier:
         check()
         return frame.evaluate(READ_GREET_TEXT.replace("__UID__", json.dumps(uid)))
 
+    def _input_driver(self):
+        return self.inputs.start_driver()
+
+    def _greet_locator(self, frame, uid):
+        return self.inputs.greet_locator(frame, uid)
+
+    def _select_job_input(self, page, frame, tracker, job_id, check):
+        return self.inputs.select_job(self, page, frame, tracker, job_id, check)
+
     @browser_operation('提交主动招呼')
     def greet(self, uid, expected_job_id=None, preflight=None):
         """对已通过跨刷新验证的候选人点「打招呼」，BOSS 自动发默认招呼语。
@@ -227,7 +237,7 @@ class RecommendVerifier:
         pw = None
         attempted = False
         try:
-            pw = sync_playwright().start()
+            pw = self._input_driver()
             browser = pw.chromium.connect_over_cdp(cdp_url)
             page = self._recommend_page(browser)
             with self._page_guard(page) as check:
@@ -246,8 +256,10 @@ class RecommendVerifier:
                     preflight()
                 self._verify_session(page)
                 check()
-                attempted = True  # From this boundary on, cancellation cannot prove no send.
-                state = frame.evaluate(CLICK_GREET.replace("__UID__", json.dumps(uid)))
+                def mark_attempt():
+                    nonlocal attempted
+                    attempted = True
+                state = self.inputs.greet(self, page, frame, uid, job_id, preflight, check, mark_attempt)
                 if state == "missing":
                     raise BrowserError("未找到该候选人的卡片，页面可能已刷新，请重新验证")
                 if state == "already":
@@ -275,7 +287,7 @@ class RecommendVerifier:
         cdp_url = self._find_cdp_url()
         pw = None
         try:
-            pw = sync_playwright().start()
+            pw = self._input_driver()
             browser = pw.chromium.connect_over_cdp(cdp_url)
             page = self._recommend_page(browser)
             with self._page_guard(page) as check:
@@ -290,15 +302,7 @@ class RecommendVerifier:
                     initial = tracker.evaluate('state => state.read()')
                     already_selected = initial.get('job_id') == str(job_id)
                     if not already_selected:
-                        if not frame.evaluate(OPEN_JOB_MENU):
-                            raise BrowserError('未找到岗位下拉框，停止切换', code='job_menu_missing', diagnostics={'page_url':page.url,'frame_url':frame.url})
-                        deadline = time.monotonic() + self._wait_timeout
-                        while not tracker.evaluate(PICK_JOB.replace('__JOB_ID__', json.dumps(str(job_id)))):
-                            check()
-                            if time.monotonic() >= deadline:
-                                raise BrowserError('未能在下拉框选中该岗位，请确认该岗位仍处于开放状态', code='job_option_missing', diagnostics={'page_url':page.url,'frame_url':frame.url})
-                            page.wait_for_timeout(100)
-                        # Dropdown mounting is not candidate-list refresh evidence.
+                        self._select_job_input(page, frame, tracker, job_id, check)
                     deadline = time.monotonic() + self._wait_timeout
                     stable_since, revision = None, None
                     while time.monotonic() < deadline:
@@ -323,7 +327,7 @@ class RecommendVerifier:
                             'candidate_count':current.get('count', 0), 'frame_found':True})
                 finally:
                     try:
-                        tracker.evaluate('state => state.observer.disconnect()')
+                        tracker.evaluate('state => { state.disarmClick?.(); state.observer.disconnect(); }')
                     except Exception:
                         pass  # The document may have been destroyed; preserve the actual failure.
                     try:
@@ -340,7 +344,7 @@ class RecommendVerifier:
         cdp_url = self._find_cdp_url()
         pw = None
         try:
-            pw = sync_playwright().start()
+            pw = self._input_driver()
             browser = pw.chromium.connect_over_cdp(cdp_url)
             page = self._recommend_page(browser)
             with self._page_guard(page) as check:
@@ -373,7 +377,7 @@ class RecommendVerifier:
         cdp_url = self._find_cdp_url()
         pw = None
         try:
-            pw = sync_playwright().start()
+            pw = self._input_driver()
             browser = pw.chromium.connect_over_cdp(cdp_url)
             page = self._recommend_page(browser)
             with self._page_guard(page) as check:

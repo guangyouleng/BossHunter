@@ -71,7 +71,11 @@ FRIEND_BATCH_SIZE = 50
 class LocalBossSession:
     def __init__(self, cookie_loader=None, transport=None, throttle=None, user_data_dir=None,
                  read_delay=(120.0, 180.0), daily_limit=100, page_delay=15.0, stop_event=None,
-                 request_counter=None, account_pause_handler=None, page_delay_max=30.0):
+                 request_counter=None, account_pause_handler=None, page_delay_max=30.0,
+                 browser_kind='chrome'):
+        if browser_kind not in {'chrome', 'cloakbrowser'}:
+            raise ValueError('招聘浏览器类型无效')
+        self._browser_kind = browser_kind
         self._user_data_dir = user_data_dir
         self.cookie_loader = cookie_loader or self.load_cookies
         self.transport = transport
@@ -178,6 +182,21 @@ class LocalBossSession:
             raise exc
         response.raise_for_status()
 
+    def _raise_account_pause(self, message, *, response=None, code='account_mismatch'):
+        # Business-code refusals and identity failures must stop other Web/worker
+        # tasks too, just like an HTTP 403. Never retain the platform body.
+        if self._account_pause_handler:
+            self._account_pause_handler(1800)
+        details = {'http_status':response.status_code, 'page_url':str(response.url)} if response is not None else {}
+        exc = AccountPauseError(message, code=code, stage='后台 HTTP 读取', diagnostics=details)
+        if getattr(self, 'diagnostic_handler', None):
+            self.diagnostic_handler(exc)
+        raise exc
+
+    def _require_api_success(self, body, response, message):
+        if not isinstance(body, dict) or type(body.get('code')) is not int or body['code'] != 0:
+            self._raise_account_pause(message, response=response, code='platform_rejected')
+
     def read_conversation(self, ident, name, position_title, expected_account=None, *, include_attachments=False, throttle=True, since_mid=None):
         """Read one already-bound conversation. Never mark read or operate a tab.
 
@@ -209,8 +228,7 @@ class LocalBossSession:
                     body = response.json()
                 except (httpx.HTTPError, ValueError):
                     raise BrowserError('后台会话读取未完成；保留原记录，不自动重试') from None
-                if not isinstance(body, dict) or body.get('code') != 0:
-                    raise AccountPauseError('BOSS 未接受会话读取请求，请核实登录状态；未操作标签页')
+                self._require_api_success(body, response, 'BOSS 未接受会话读取请求，请核实登录状态；未操作标签页')
                 data = body.get('zpData')
                 if not isinstance(data, dict) or not isinstance(data.get('messages'), list) or type(data.get('hasMore')) is not bool:
                     raise BrowserError('会话数据结构变化，保留原记录')
@@ -223,10 +241,10 @@ class LocalBossSession:
                     incoming = str(sender.get('uid')) == gid
                     outgoing = str(receiver.get('uid')) == gid
                     if incoming == outgoing:
-                        raise AccountPauseError('消息不属于绑定候选人，停止同步')
+                        self._raise_account_pause('消息不属于绑定候选人，停止同步')
                     peer, employer = (sender, receiver) if incoming else (receiver, sender)
                     if str(peer.get('source')) != source or not employer.get('uid'):
-                        raise AccountPauseError('消息来源或招聘账号身份不一致，停止同步')
+                        self._raise_account_pause('消息来源或招聘账号身份不一致，停止同步')
                     account_ids.add(str(employer['uid']))
                     if peer.get('name'):
                         names.add(peer['name'])
@@ -262,10 +280,10 @@ class LocalBossSession:
                 raise BrowserError('单会话超过最小样本读取上限，保留原记录')
         bad_name = (names != {name}) if since_mid is None else bool(names - {name})
         if len(account_ids) != 1 or bad_name or (not messages and since_mid is None):
-            raise AccountPauseError('候选人或招聘账号未能准确核实，保留原记录')
+            self._raise_account_pause('候选人或招聘账号未能准确核实，保留原记录')
         account = next(iter(account_ids))
         if expected_account and account != expected_account:
-            raise AccountPauseError('当前登录招聘账号与绑定会话不一致，停止同步')
+            self._raise_account_pause('当前登录招聘账号与绑定会话不一致，停止同步')
         if not messages:
             return None
         messages.sort(key=lambda m: (m['timestamp'], int(m['id'])))
@@ -411,11 +429,14 @@ class LocalBossSession:
         if self._user_data_dir:
             user_data = Path(self._user_data_dir).expanduser()
         else:
+            if self._browser_kind == 'cloakbrowser':
+                raise BrowserError('CloakBrowser 未配置招聘资料目录，请通过启动器选择浏览器后启动')
             user_data = _default_chrome_user_data_dir()
+        label = 'CloakBrowser' if self._browser_kind == 'cloakbrowser' else 'Chrome'
         root = user_data / 'Default'
         cookie_file = next((p for p in [root / 'Cookies', root / 'Network/Cookies'] if p.is_file()), None)
         if cookie_file is None:
-            raise BrowserError('未找到 Chrome 的 BOSS 登录 Cookie；独立 Chrome 请配置 browser.recruiting_user_data_dir')
+            raise BrowserError(f'未找到 {label} 的 BOSS 登录 Cookie；请在所选浏览器人工登录并核实资料目录')
         options = {'cookie_file': str(cookie_file), 'domain_name': '.zhipin.com'}
         if sys.platform == 'win32':
             # Chrome's Windows AES key belongs to this user-data directory.
@@ -423,26 +444,27 @@ class LocalBossSession:
             # profile, even when cookie_file points at our independent profile.
             key_file = user_data / 'Local State'
             if not key_file.is_file():
-                raise AccountPauseError('未找到当前 Chrome 资料目录的 Local State 密钥文件，请在本程序启动的独立 Chrome 中完成登录')
+                raise AccountPauseError(f'未找到当前 {label} 资料目录的 Local State 密钥文件，请在所选独立浏览器中完成登录')
             options['key_file'] = str(key_file)
         try:
             # Initialise before importing as well: Windows dependencies can
             # access COM while loading, and imports may first occur in a worker.
             with _cookie_com_context():
                 import browser_cookie3
-                raw = browser_cookie3.chrome(**options)
+                loader = browser_cookie3.chromium if self._browser_kind == 'cloakbrowser' else browser_cookie3.chrome
+                raw = loader(**options)
         except ImportError as exc:
             raise BrowserError('请安装招聘依赖：pip install -e ".[recruiting]"') from exc
         except Exception as exc:
             # Do not expose raw exceptions, which can contain paths or secrets.
-            raise AccountPauseError('无法读取 Chrome 中的 BOSS 登录状态：本机 Cookie 数据库读取或解密失败'
-                                    f'（{type(exc).__name__}）。请提供此错误类型和 Chrome 版本以便排查') from None
+            raise AccountPauseError(f'无法读取 {label} 中的 BOSS 登录状态：本机 Cookie 数据库读取或解密失败'
+                                    f'（{type(exc).__name__}）。请提供此错误类型和浏览器版本以便排查') from None
         scoped = CookieJar()
         for cookie in raw:
             if cookie.domain.lstrip('.') in {'zhipin.com', 'www.zhipin.com'} and not cookie.is_expired():
                 scoped.set_cookie(cookie)
         if not any(c.name in {'wt2', 'zp_at'} for c in scoped):
-            raise AccountPauseError('本地未找到有效期内的 BOSS 登录 Cookie，请在 Chrome 中登录招聘端')
+            raise AccountPauseError(f'本地未找到有效期内的 BOSS 登录 Cookie，请在 {label} 中登录招聘端')
         return scoped
 
     def read_jobs(self):
@@ -461,8 +483,7 @@ class LocalBossSession:
                     body = response.json()
                 except (httpx.HTTPError, ValueError):
                     raise BrowserError('后台岗位读取未完成；保留已有岗位，不自动重试或操作标签页') from None
-                if not isinstance(body, dict) or body.get('code') != 0:
-                    raise AccountPauseError('BOSS 未接受本地登录状态或需要验证，请在 Chrome 中核实；没有操作标签页')
+                self._require_api_success(body, response, 'BOSS 未接受本地登录状态或需要验证，请在 Chrome 中核实；没有操作标签页')
                 data = body.get('zpData')
                 if not isinstance(data, dict) or not isinstance(data.get('data'), list):
                     raise BrowserError('平台岗位数据结构变化，停止本次同步')
@@ -509,8 +530,7 @@ class LocalBossSession:
                 body = response.json()
             except (httpx.HTTPError, ValueError):
                 raise BrowserError('后台额度读取未完成；保留原记录，不自动重试') from None
-        if not isinstance(body, dict) or body.get('code') != 0:
-            raise AccountPauseError('BOSS 未接受额度读取请求，请核实登录状态；未操作标签页')
+        self._require_api_success(body, response, 'BOSS 未接受额度读取请求，请核实登录状态；未操作标签页')
         data = body.get('zpData')
         if not isinstance(data, dict):
             raise BrowserError('额度数据结构变化，停止本次同步')
@@ -565,8 +585,7 @@ class LocalBossSession:
                 body = response.json()
             except (httpx.HTTPError, ValueError):
                 raise BrowserError('联系人岗位读取未完成；保留原记录，不自动重试') from None
-        if not isinstance(body, dict) or body.get('code') != 0:
-            raise AccountPauseError('BOSS 未接受联系人读取请求，请核实登录状态；未操作标签页')
+        self._require_api_success(body, response, 'BOSS 未接受联系人读取请求，请核实登录状态；未操作标签页')
         data = body.get('zpData')
         if not isinstance(data, dict) or not isinstance(data.get('friendList'), list):
             raise BrowserError('联系人数据结构变化，停止本次关联')

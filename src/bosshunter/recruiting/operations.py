@@ -21,7 +21,7 @@ class BrowserCoordinator:
             finally:
                 self._local.depth -= 1
             return
-        token = self.store.owner.split(':', 1)[0] + ':' + uuid4().hex
+        token = self.store.owner.rsplit(':', 1)[0] + ':' + uuid4().hex
         with self.store.db() as db:
             db.execute('BEGIN IMMEDIATE')
             busy = self.store.task_active(db, 'browser-dom')

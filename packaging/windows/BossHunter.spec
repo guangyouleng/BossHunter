@@ -25,7 +25,7 @@ for pattern in ('*.mjs', 'site-patterns/*.md'):
         datas.append((str(source), str(Path('bosshunter/browser/runtime') / source.relative_to(runtime).parent)))
 binaries = [(str(path), '.') for path in vc_runtime]
 hiddenimports = collect_submodules('bosshunter') + ['browser_cookie3', 'tzdata']
-for package in ('patchright', 'rapidocr_onnxruntime', 'onnxruntime', 'tzdata'):
+for package in ('patchright', 'playwright', 'cloakbrowser', 'rapidocr_onnxruntime', 'onnxruntime', 'tzdata'):
     d, b, h = collect_all(package)
     datas += d
     binaries += b

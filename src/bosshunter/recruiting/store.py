@@ -77,7 +77,10 @@ class RequestPaused(ValueError):
 
 class Store:
     def __init__(self, path: Path):
-        self.owner = f'{os.getpid()}:{uuid4().hex}'
+        from .process_state import process_birth
+        pid = os.getpid()
+        birth = process_birth(pid)
+        self.owner = f'{pid}:' + (f'w{birth:x}:' if birth is not None else '') + uuid4().hex
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.db() as db:
@@ -212,10 +215,13 @@ class Store:
     @staticmethod
     def owner_alive(owner):
         try:
-            pid = int(str(owner).split(':', 1)[0])
+            parts = str(owner).split(':', 2)
+            pid = int(parts[0])
             if pid <= 0:
                 return False
             from .process_state import process_alive
+            if len(parts) == 3 and parts[1].startswith('w'):
+                return process_alive(pid, int(parts[1][1:], 16))
             return process_alive(pid)
         except PermissionError:
             return True

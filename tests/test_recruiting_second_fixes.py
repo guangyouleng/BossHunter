@@ -280,7 +280,7 @@ class SecondFixTests(unittest.TestCase):
         final = json.loads(self.service.store.row('conversations', self.cid)['snapshot'])
         self.assertEqual([m['id'] for m in final['messages']], ['1', '2', '3'])
 
-    def test_stop_during_startup_quota_read_prevents_worker_start(self):
+    def test_stop_during_startup_quota_read_prevents_discovery_execution(self):
         self.service.store.set_setting('greeting_quota', {})
         entered, release = threading.Event(), threading.Event()
         def quota():
@@ -295,10 +295,54 @@ class SecondFixTests(unittest.TestCase):
                 self.assertTrue(entered.wait(2))
                 self.service.stop_discovery()
                 release.set()
-                with self.assertRaises(TaskCancelled):
-                    start.result(timeout=3)
+                self.assertTrue(start.result(timeout=3)['running'])
+                self.service.discovery_worker.join(2)
         run.assert_not_called()
         self.assertTrue(self.service.discovery_stop.is_set())
+
+    def test_discovery_start_returns_while_quota_waits_so_stop_remains_available(self):
+        self.service.store.set_setting('greeting_quota', {})
+        entered, release = threading.Event(), threading.Event()
+        self.service.local_session = Mock()
+        def quota():
+            entered.set()
+            self.assertTrue(release.wait(3))
+            return {'remaining':1, 'unlimited':False}
+        self.service.local_session.read_greeting_quota.side_effect=quota
+        with patch.object(self.service, 'run_discovery') as run, ThreadPoolExecutor(max_workers=1) as pool:
+            start=pool.submit(self.service.start_discovery)
+            self.assertTrue(entered.wait(2))
+            try:
+                self.assertTrue(start.result(timeout=.5)['running'])
+            finally:
+                self.service.stop_discovery()
+                release.set()
+                try:
+                    start.result(timeout=3)
+                except TaskCancelled:
+                    pass
+                if self.service.discovery_worker:
+                    self.service.discovery_worker.join(2)
+        run.assert_not_called()
+
+    def test_background_quota_failure_stops_before_any_discovery_action(self):
+        self.service.store.set_setting('greeting_quota', {})
+        self.service.local_session=Mock()
+        self.service.local_session.read_greeting_quota.side_effect=BrowserError('合成额度读取失败')
+        with patch.object(self.service, 'run_discovery') as run:
+            self.assertTrue(self.service.start_discovery()['running'])
+            self.service.discovery_worker.join(2)
+        self.assertFalse(self.service.discovery_worker.is_alive())
+        run.assert_not_called()
+        self.assertTrue(any('合成额度读取失败' in e['detail'] for e in self.service.store.rows('events')))
+
+    def test_start_without_selected_jobs_does_not_consume_quota_read(self):
+        self.service.jobs.select([])
+        self.service.store.set_setting('greeting_quota', {})
+        self.service.local_session=Mock()
+        with self.assertRaisesRegex(ValueError, '勾选'):
+            self.service.start_discovery()
+        self.service.local_session.read_greeting_quota.assert_not_called()
 
     def test_custom_mode_requires_platform_quota_and_stops_on_read_failure(self):
         self.service.jobs.save_budget('custom', 10)

@@ -30,7 +30,7 @@ class RecommendPauseTests(unittest.TestCase):
             verifier, runtime = self.verifier(page)
             self.service.set_monitor_enabled(True)
             self.service.discovery_stop.clear()
-            with patch('bosshunter.recruiting.recommend.sync_playwright',return_value=runtime):
+            with patch('bosshunter.recruiting.browser_backends.chrome.sync_playwright',return_value=runtime):
                 with self.assertRaises(AccountPauseError):
                     verifier.reload()
             self.assertFalse(self.service.store.setting('monitor_enabled'))
@@ -44,7 +44,7 @@ class RecommendPauseTests(unittest.TestCase):
         page = Page(RECOMMEND_PAGE,[frame])
         page.wait_for_timeout = Mock(side_effect=lambda _:self.emit(page))
         verifier,runtime = self.verifier(page)
-        with patch('bosshunter.recruiting.recommend.sync_playwright',return_value=runtime):
+        with patch('bosshunter.recruiting.browser_backends.chrome.sync_playwright',return_value=runtime):
             with self.assertRaises(AccountPauseError):
                 verifier.select_job('job')
         self.assertTrue(self.service.discovery_stop.is_set())
@@ -64,6 +64,17 @@ class RecommendPauseTests(unittest.TestCase):
             with verifier._page_guard(page):
                 self.emit(page,403,FRAME_URL)
         self.assertTrue(self.service.discovery_stop.is_set())
+
+    def test_chat_document_refusal_pauses_shared_reply_input_guard(self):
+        for status in (403, 429):
+            page = Page('https://www.zhipin.com/web/chat/index', [])
+            verifier, _ = self.verifier(page)
+            pause = verifier._account_pause_handler = Mock()
+            with self.assertRaises(AccountPauseError):
+                with verifier._page_guard(page):
+                    self.emit(page, status, page.url)
+            pause.assert_called_once_with(1800)
+            self.assertEqual(page.listeners, {})
 
     def test_verification_page_navigation_triggers_pause_once(self):
         page = Page(RECOMMEND_PAGE,[])

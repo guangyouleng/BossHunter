@@ -64,18 +64,28 @@ return JSON.stringify({count: items.length, contacts});
 CLICK_GREET = r"""
 (() => {
     const uid = __UID__;
-    for (const card of document.querySelectorAll(__dom_recommend_cards__)) {
+    const job = __JOB_ID__;
+    const selected = document.querySelector(__dom_selected_job__) || document.querySelector(__dom_selected_job_alternate__);
+    if (selected?.getAttribute('value') !== job) throw Error('点击前岗位已变化，停止招呼');
+    const visible = e => !!e && e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
+    const documents=[document];
+    try { if(window.top.document!==document) documents.push(window.top.document); } catch {}
+    if(documents.some(doc=>[...doc.querySelectorAll(__dom_page_prompts__)].some(visible))) throw Error('请先处理推荐页弹窗，停止招呼');
+    const cards = [...document.querySelectorAll(__dom_recommend_cards__)].filter(card => {
         const inner = card.querySelector(__dom_recommend_identity__);
         const geekid = (inner?.getAttribute('data-geekid') || inner?.getAttribute('data-geek') || '').trim();
-        if (geekid !== uid) continue;
-        const btn = card.querySelector(__dom_greet_button__);
-        if (!btn) return 'unavailable';
-        if ((btn.innerText || '').trim() === '继续沟通') return 'already';
-        if ((btn.innerText || '').trim() !== '打招呼') return 'unavailable';
-        btn.click();
-        return 'clicked';
-    }
-    return 'missing';
+        return geekid === uid && visible(card);
+    });
+    if (!cards.length) return 'missing';
+    if (cards.length !== 1) throw Error('无法唯一核实候选人卡片，停止招呼');
+    const buttons = [...cards[0].querySelectorAll(__dom_greet_button__)].filter(visible);
+    if (!buttons.length) return 'unavailable';
+    if (buttons.length !== 1) throw Error('无法唯一核实打招呼按钮，停止招呼');
+    const btn = buttons[0];
+    if ((btn.innerText || '').trim() === '继续沟通') return 'already';
+    if ((btn.innerText || '').trim() !== '打招呼' || btn.disabled || btn.getAttribute('aria-disabled') === 'true') return 'unavailable';
+    btn.click();
+    return 'clicked';
 })()
 """
 
@@ -83,14 +93,15 @@ CLICK_GREET = r"""
 READ_GREET_TEXT = r"""
 (() => {
     const uid = __UID__;
-    for (const card of document.querySelectorAll(__dom_recommend_cards__)) {
+    const visible = e => !!e && e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
+    const cards = [...document.querySelectorAll(__dom_recommend_cards__)].filter(card => {
         const inner = card.querySelector(__dom_recommend_identity__);
         const geekid = (inner?.getAttribute('data-geekid') || inner?.getAttribute('data-geek') || '').trim();
-        if (geekid !== uid) continue;
-        const btn = card.querySelector(__dom_greet_button__);
-        return btn ? (btn.innerText || '').trim() : '';
-    }
-    return null;
+        return geekid === uid && visible(card);
+    });
+    if (cards.length !== 1) return null;
+    const buttons = [...cards[0].querySelectorAll(__dom_greet_button__)].filter(visible);
+    return buttons.length === 1 ? (buttons[0].innerText || '').trim() : null;
 })()
 """
 
@@ -157,6 +168,85 @@ item.click(); return true;})
 """
 
 
+# Reset refresh evidence at the actual input event, after cursor travel.
+ARM_JOB_CLICK = r"""
+(state => {
+    state.disarmClick?.(); state.clicked=false;
+    const options=[...document.querySelectorAll(__dom_job_options__)]
+        .filter(item=>item.getAttribute('value')===__JOB_ID__ && item.getClientRects().length && getComputedStyle(item).visibility!=='hidden');
+    if(options.length!==1) return false;
+    const item=options[0];
+    const capture=event=>{
+        if(!item.contains(event.target)) return;
+        state.observer.takeRecords(); state.changed=false; state.revision=0; state.clicked=true;
+        state.disarmClick();
+    };
+    state.disarmClick=()=>document.removeEventListener('click',capture,true);
+    document.addEventListener('click',capture,true);
+    return true;
+})
+"""
+
+
+ARM_GREET_CLICK = r"""
+(() => {
+    const uid=__UID__, job=__JOB_ID__;
+    const visible=e=>!!e && e.getClientRects().length>0 && getComputedStyle(e).visibility!=='hidden';
+    const matches=[...document.querySelectorAll(__dom_recommend_cards__)].filter(card=>{
+        const inner=card.querySelector(__dom_recommend_identity__);
+        return visible(card) && (inner?.getAttribute('data-geekid') || inner?.getAttribute('data-geek') || '').trim()===uid;
+    });
+    if(matches.length!==1) throw Error('无法唯一核实候选人卡片');
+    const card=matches[0], buttons=[...card.querySelectorAll(__dom_greet_button__)].filter(visible);
+    if(buttons.length!==1) throw Error('无法唯一核实可见打招呼按钮');
+    const button=buttons[0];
+    const state={clicked:false,blocked:false};
+    const guard=event=>{
+        const target=event.target.closest?.(__dom_greet_button__);
+        if(!target) return;
+        const selected=document.querySelector(__dom_selected_job__) || document.querySelector(__dom_selected_job_alternate__);
+        const inner=card.querySelector(__dom_recommend_identity__);
+        const current=(inner?.getAttribute('data-geekid') || inner?.getAttribute('data-geek') || '').trim();
+        const documents=[document];
+        try { if(window.top.document!==document) documents.push(window.top.document); } catch {}
+        const prompt=documents.some(doc=>[...doc.querySelectorAll(__dom_page_prompts__)].some(visible));
+        if(state.blocked || target!==button || !card.isConnected || !button.isConnected || !visible(button) ||
+            selected?.getAttribute('value')!==job || current!==uid || button.innerText.trim()!=='打招呼' ||
+            button.disabled || button.getAttribute('aria-disabled')==='true' || prompt) {
+            state.blocked=true; event.preventDefault(); event.stopImmediatePropagation(); return;
+        }
+        if(event.type==='click') {state.clicked=true;state.dispose();}
+    };
+    const events=['pointerdown','mousedown','click'];
+    state.dispose=()=>events.forEach(name=>window.removeEventListener(name,guard,true));
+    events.forEach(name=>window.addEventListener(name,guard,true));
+    return state;
+})()
+"""
+
+
+CONTACT_SCROLL_TARGET = r"""
+(() => {
+    const items=[...document.querySelectorAll(__dom_contacts__)];
+    if(!items.length) return {empty:true, at_bottom:true};
+    let root=items[0].parentElement;
+    while(root && root!==document.body && root!==document.documentElement) {
+        if(/^(auto|scroll|overlay)$/.test(getComputedStyle(root).overflowY) && root.clientHeight>0) break;
+        root=root.parentElement;
+    }
+    if(!root || root===document.body || root===document.documentElement) return {missing:true};
+    const rect=root.getBoundingClientRect();
+    const left=Math.max(0,rect.left), right=Math.min(innerWidth,rect.right);
+    const top=Math.max(0,rect.top), bottom=Math.min(innerHeight,rect.bottom);
+    const x=(left+right)/2, y=(top+bottom)/2;
+    const hit=document.elementFromPoint(x,y);
+    return {blocked:right-left<4 || bottom-top<4 || !hit || !root.contains(hit),
+        x,y,delta:Math.max(40,Math.min(600,root.clientHeight*.7)),
+        at_bottom:root.scrollTop+root.clientHeight>=root.scrollHeight-2};
+})()
+"""
+
+
 READ_CANDIDATES = r"""
 (() => {
     const out = [];
@@ -204,5 +294,8 @@ READ_JOB_ID = render_dom(READ_JOB_ID)
 WATCH_JOB_LIST = render_dom(WATCH_JOB_LIST)
 OPEN_JOB_MENU = render_dom(OPEN_JOB_MENU)
 PICK_JOB = render_dom(PICK_JOB)
+ARM_JOB_CLICK = render_dom(ARM_JOB_CLICK)
+ARM_GREET_CLICK = render_dom(ARM_GREET_CLICK)
+CONTACT_SCROLL_TARGET = render_dom(CONTACT_SCROLL_TARGET)
 READ_CANDIDATES = render_dom(READ_CANDIDATES)
 PAGE_STATUS = render_dom(PAGE_STATUS)

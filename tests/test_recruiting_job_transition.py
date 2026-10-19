@@ -17,7 +17,7 @@ class JobTransitionTests(unittest.TestCase):
         pw = PW(Browser(Context([page])))
         verifier = RecommendVerifier(lambda: {}, cdp_url='http://127.0.0.1:9222', wait_timeout=2)
         ticks = iter([n * .2 for n in range(100)])
-        with patch('bosshunter.recruiting.recommend.sync_playwright', return_value=SyncPlaywright(pw)), \
+        with patch('bosshunter.recruiting.browser_backends.chrome.sync_playwright', return_value=SyncPlaywright(pw)), \
              patch('bosshunter.recruiting.recommend.time.monotonic', side_effect=lambda: next(ticks)):
             try:
                 value = verifier.select_job('new')

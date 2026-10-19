@@ -26,6 +26,23 @@ SUPPORT_SPEC.loader.exec_module(support)
 
 
 class WindowsPackagingTests(TestCase):
+    def test_process_identity_smoke_checks_own_pid_and_rejects_reused_identity(self):
+        with patch.object(launcher.sys, 'platform', 'win32'), patch('bosshunter.recruiting.process_state.process_birth', return_value=7) as birth, patch('bosshunter.recruiting.process_state.process_alive', side_effect=[True, False]) as alive:
+            launcher.check_process_identity()
+        birth.assert_called_once_with(os.getpid())
+        self.assertEqual([call.args for call in alive.call_args_list], [(os.getpid(),7), (os.getpid(),8)])
+
+    def test_process_identity_smoke_stops_on_missing_or_unchecked_birth(self):
+        for stamp, values in [(None, []), (7, [False]), (7, [True, True])]:
+            with self.subTest(stamp=stamp, values=values), patch.object(launcher.sys, 'platform', 'win32'), patch('bosshunter.recruiting.process_state.process_birth', return_value=stamp), patch('bosshunter.recruiting.process_state.process_alive', side_effect=values):
+                with self.assertRaisesRegex(RuntimeError, 'creation-time identity check failed'):
+                    launcher.check_process_identity()
+
+    def test_process_identity_smoke_skips_windows_api_on_other_systems(self):
+        with patch.object(launcher.sys, 'platform', 'darwin'), patch('bosshunter.recruiting.process_state.process_birth') as birth:
+            launcher.check_process_identity()
+        birth.assert_not_called()
+
     def test_cookie_smoke_check_uses_worker_context_without_cookie_or_shadow_reads(self):
         events = []
 
@@ -172,6 +189,23 @@ class WindowsPackagingTests(TestCase):
         active.terminate.assert_called_once()
         job.close.assert_called_once()
 
+    def test_browser_exit_preserves_http_monitoring_but_backend_exit_is_fatal(self):
+        controller = launcher.Controller(Path('.'))
+        browser, proxy, web, worker = [Mock() for _ in range(4)]
+        controller.processes = [browser, proxy, web, worker]
+        controller.browser_process = browser
+        browser.poll.return_value = 0
+        for process in (proxy, web, worker):
+            process.poll.return_value = None
+        self.assertFalse(controller.backend_exited())
+        for process in (proxy, web, worker):
+            with self.subTest(process=process):
+                process.poll.return_value = 1
+                self.assertTrue(controller.backend_exited())
+                process.poll.return_value = None
+        controller.stop()
+        self.assertIsNone(controller.browser_process)
+
     def test_cancellation_interrupts_health_wait_without_network(self):
         controller = launcher.Controller(Path('.'))
         controller.cancel.set()
@@ -179,6 +213,40 @@ class WindowsPackagingTests(TestCase):
             with self.assertRaisesRegex(RuntimeError, '取消'):
                 controller.wait_ready('http://127.0.0.1:9222/json/version', lambda _: True)
             read.assert_not_called()
+
+    def test_cancelled_start_does_not_write_config_or_launch_any_process(self):
+        with TemporaryDirectory() as folder:
+            base = Path(folder)
+            controller = launcher.Controller(base)
+            controller.cancel.set()
+            with patch.object(launcher, 'port_free', return_value=True), patch.object(launcher, 'find_chrome', return_value=Path('chrome.exe')), patch.object(launcher, 'node_path', return_value=Mock(is_file=lambda: True)), patch.object(launcher, 'WindowsJob') as job, patch.object(controller, 'spawn') as spawn, patch.object(controller, 'wait_ready'), patch.object(launcher, 'open_dashboard') as opened:
+                with self.assertRaisesRegex(RuntimeError, '取消'):
+                    controller.start()
+            self.assertEqual(spawn.call_count, 0)
+            job.assert_not_called()
+            opened.assert_not_called()
+            self.assertFalse((base / 'config.yaml').exists())
+
+    def test_cancel_during_successful_health_read_is_not_reported_ready(self):
+        controller = launcher.Controller(Path('.'))
+        def health(_):
+            controller.cancel.set()
+            return b'ready'
+        with patch.object(launcher, 'http_read', side_effect=health):
+            with self.assertRaisesRegex(RuntimeError, '取消'):
+                controller.wait_ready('http://127.0.0.1:9222/json/version', lambda _: True)
+
+    def test_cancelled_spawn_does_not_open_logs_or_launch_process(self):
+        with TemporaryDirectory() as folder:
+            controller = launcher.Controller(Path(folder))
+            (Path(folder) / 'logs').mkdir()
+            controller.job = Mock()
+            controller.cancel.set()
+            with patch.object(launcher.subprocess, 'CREATE_NO_WINDOW', 0, create=True), patch.object(launcher.subprocess, 'Popen') as spawn:
+                with self.assertRaisesRegex(RuntimeError, '取消'):
+                    controller.spawn(['synthetic.exe'], 'web', {})
+            spawn.assert_not_called()
+            self.assertEqual(controller.logs, [])
 
     def test_user_directory_does_not_depend_on_source_checkout(self):
         with patch.dict(os.environ, {'LOCALAPPDATA': 'C:/Users/Test/AppData/Local'}):
@@ -192,7 +260,7 @@ class WindowsPackagingTests(TestCase):
         def analysis(*args, **kwargs):
             captured.update(kwargs)
             return fake_a
-        hook = Mock(collect_all=lambda _: ([], [], []), collect_submodules=lambda _: [], copy_metadata=lambda *a, **kw: [])
+        hook = Mock(collect_all=Mock(return_value=([], [], [])), collect_submodules=lambda _: [], copy_metadata=lambda *a, **kw: [])
         with TemporaryDirectory() as folder, patch.dict(os.environ, {'BOSSHUNTER_BUILD_NODE': folder, 'BOSSHUNTER_BUILD_VC_RUNTIME': folder}), patch.dict('sys.modules', {'PyInstaller': Mock(), 'PyInstaller.utils': Mock(), 'PyInstaller.utils.hooks': hook}):
             for name in support.vc_runtime_manifest()['dll_names']:
                 WindowsBuildArchitectureTests.executable(Path(folder) / name, 0x8664)
@@ -200,6 +268,8 @@ class WindowsPackagingTests(TestCase):
                          'PYZ': Mock(), 'EXE': Mock(), 'COLLECT': Mock()}
             exec(compile((ROOT / 'packaging/windows/BossHunter.spec').read_text(), 'BossHunter.spec', 'exec'), namespace)
         sources = [Path(source) for source, _ in captured['datas']]
+        self.assertIn(('playwright',), [call.args for call in hook.collect_all.call_args_list])
+        self.assertIn(('cloakbrowser',), [call.args for call in hook.collect_all.call_args_list])
         self.assertIn(ROOT / 'src/bosshunter/browser/runtime/chat-observer.mjs', sources)
         self.assertNotIn(ROOT / 'config.yaml', sources)
         self.assertNotIn(ROOT / 'data', sources)
@@ -217,6 +287,168 @@ class WindowsPackagingTests(TestCase):
         self.assertEqual(icon.read_bytes()[:4], b'\x00\x00\x01\x00')
         script = (ROOT / 'packaging/windows/BossHunter.iss').read_text()
         self.assertIn(r'SetupIconFile=assets\BossHunter.ico', script)
+
+
+class DesktopBrowserChoiceTests(TestCase):
+    def test_desktop_locks_choice_during_start_run_and_stop_then_unlocks(self):
+        class Variable:
+            def __init__(self, value=''): self.value = value
+            def get(self): return self.value
+            def set(self, value): self.value = value
+
+        widgets = []
+        def factory(kind):
+            def create(*args, **kwargs):
+                widget = Mock()
+                props = dict(kwargs)
+                widget.configure.side_effect = lambda **values: props.update(values)
+                widgets.append((kind, widget, props))
+                return widget
+            return create
+        root, controller, kernel = Mock(), Mock(processes=[]), Mock()
+        controller.backend_exited.return_value = False
+        kernel.CreateMutexW.return_value = 123
+        dialog = Mock()
+        dialog.askopenfilename.return_value = 'C:/Cloak Browser/chrome.exe'
+        ttk = SimpleNamespace(**{name: factory(name) for name in ('Label', 'Frame', 'Combobox', 'Entry', 'Button')})
+        tk = SimpleNamespace(Tk=lambda: root, StringVar=Variable, ttk=ttk, filedialog=dialog, messagebox=Mock())
+        def find(kind, text=None):
+            return next((widget, props) for name, widget, props in widgets
+                        if name == kind and (text is None or props.get('text') == text))
+        def drive():
+            selector, choice = find('Combobox')
+            _, entry = find('Entry')
+            _, browse = find('Button', '选择文件')
+            _, start = find('Button', '启动系统')
+            _, stop = find('Button', '停止系统')
+            self.assertEqual(entry['state'], 'disabled')
+            choice['textvariable'].set('CloakBrowser')
+            selector.bind.call_args.args[1]()
+            self.assertEqual(entry['state'], 'normal')
+            browse['command']()
+            start['command']()
+            self.assertEqual(choice['state'], 'disabled')
+            self.assertEqual(browse['state'], 'disabled')
+            controller.start.assert_called_once_with('cloakbrowser', 'C:/Cloak Browser/chrome.exe')
+            root.after.call_args.args[1]()
+            self.assertEqual(choice['state'], 'disabled')
+            closed_browser = Mock()
+            closed_browser.poll.return_value = 0
+            controller.processes = [closed_browser]
+            root.after.call_args.args[1]()
+            controller.stop.assert_not_called()
+            self.assertEqual(choice['state'], 'disabled')
+            controller.processes = []
+            stop['command']()
+            self.assertEqual(entry['state'], 'disabled')
+            root.after.call_args.args[1]()
+            self.assertEqual(choice['state'], 'readonly')
+            self.assertEqual(entry['state'], 'normal')
+        root.mainloop.side_effect = drive
+        with TemporaryDirectory() as folder, patch.object(launcher, 'user_root', return_value=Path(folder)), patch.object(launcher, 'Controller', return_value=controller), patch.dict(sys.modules, {'tkinter': tk}), patch('ctypes.WinDLL', return_value=kernel, create=True), patch('ctypes.get_last_error', return_value=0, create=True), patch.object(launcher.threading, 'Thread', side_effect=lambda target, **kwargs: SimpleNamespace(start=target)):
+            launcher.desktop()
+
+    def make_browser(self, base, machine=0x8664):
+        binary = base / 'Cloak Browser' / 'chrome.exe'
+        binary.parent.mkdir(parents=True)
+        WindowsBuildArchitectureTests.executable(binary, machine)
+        return binary
+
+    def test_switch_back_restores_custom_chrome_profile_and_keeps_credentials(self):
+        with TemporaryDirectory() as folder:
+            base = Path(folder)
+            path, config = launcher.prepare_config(base)
+            config['browser']['recruiting_user_data_dir'] = str(base / 'original-profile')
+            config['browser']['recruiting_target_id'] = 'old-target'
+            config['ai']['api_key'] = 'synthetic-private-key'
+            save_config(config, path)
+            binary = self.make_browser(base)
+            plan = launcher.browser_plan(base, config, 'cloakbrowser', str(binary))
+            self.assertEqual(config['browser']['recruiting_target_id'], 'old-target')
+            launcher.save_browser_plan(path, config, plan)
+            saved = load_config(path)
+            self.assertNotIn('recruiting_target_id', saved['browser'])
+            self.assertEqual(saved['browser']['recruiting_user_data_dir'], str(base / 'cloakbrowser-profile'))
+            self.assertEqual(saved['ai']['api_key'], 'synthetic-private-key')
+            with patch.object(launcher, 'find_chrome', return_value=Path('chrome.exe')):
+                restored = launcher.browser_plan(base, saved, 'chrome')
+            self.assertEqual(restored['profile'], base / 'original-profile')
+            launcher.save_browser_plan(path, saved, restored)
+            self.assertEqual(load_config(path)['browser']['cloakbrowser_executable'], str(binary))
+
+    def test_missing_cloak_never_falls_back_to_chrome_or_starts_services(self):
+        with TemporaryDirectory() as folder:
+            base = Path(folder)
+            (base / 'logs').mkdir()
+            controller = launcher.Controller(base)
+            with patch.object(launcher, 'port_free', return_value=True), patch.object(launcher, 'find_chrome') as chrome, patch.object(controller, 'spawn') as spawn:
+                with self.assertRaisesRegex(RuntimeError, '完整解压'):
+                    controller.start('cloakbrowser', '')
+            chrome.assert_not_called()
+            spawn.assert_not_called()
+            self.assertEqual(load_config(base / 'config.yaml')['browser']['recruiting_browser_kind'], 'chrome')
+
+    def test_rejects_non_x64_invalid_and_relative_executables(self):
+        with TemporaryDirectory() as folder:
+            base = Path(folder)
+            _, config = launcher.prepare_config(base)
+            binary = self.make_browser(base, 0xaa64)
+            for value in (str(binary), 'chrome.exe', str(base / 'missing.exe')):
+                with self.subTest(value=value), self.assertRaises(RuntimeError):
+                    launcher.browser_plan(base, config, 'cloakbrowser', value)
+            binary.write_bytes(b'MZ')
+            with self.assertRaisesRegex(RuntimeError, 'x64'):
+                launcher.browser_plan(base, config, 'cloakbrowser', str(binary))
+
+    def test_same_profile_is_rejected(self):
+        with TemporaryDirectory() as folder:
+            base = Path(folder)
+            _, config = launcher.prepare_config(base)
+            config['browser']['desktop_browser_profiles'] = {'cloakbrowser': config['browser']['recruiting_user_data_dir']}
+            with self.assertRaisesRegex(RuntimeError, '不能共用'):
+                launcher.browser_plan(base, config, 'cloakbrowser', 'unused.exe')
+
+    def test_seed_survives_restart_and_corruption_never_changes_identity(self):
+        with TemporaryDirectory() as folder:
+            profile = Path(folder)
+            first = launcher.cloak_profile_args(profile)
+            self.assertEqual(first, launcher.cloak_profile_args(profile))
+            (profile / '.cloakbrowser-seed').write_text('corrupt')
+            with self.assertRaisesRegex(RuntimeError, '不会自动重置'):
+                launcher.cloak_profile_args(profile)
+            self.assertEqual((profile / '.cloakbrowser-seed').read_text(), 'corrupt')
+
+    def test_cloak_start_uses_selected_binary_profile_and_owned_process_cleanup(self):
+        with TemporaryDirectory() as folder:
+            base = Path(folder)
+            (base / 'logs').mkdir()
+            binary = self.make_browser(base)
+            controller = launcher.Controller(base)
+            job = Mock()
+            processes = [Mock() for _ in range(4)]
+            for process in processes:
+                process.poll.return_value = None
+            with patch.object(launcher, 'port_free', return_value=True), patch.object(launcher, 'find_chrome') as chrome, patch.object(launcher, 'node_path', return_value=Mock(is_file=lambda: True)), patch.object(launcher, 'WindowsJob', return_value=job), patch.object(launcher.subprocess, 'CREATE_NO_WINDOW', 0, create=True), patch.object(launcher.subprocess, 'Popen', side_effect=processes) as spawn, patch.object(controller, 'wait_ready'), patch.object(controller.cancel, 'wait', return_value=False), patch.object(launcher, 'open_dashboard'):
+                controller.start('cloakbrowser', str(binary))
+                args = spawn.call_args_list[0].args[0]
+                self.assertEqual(args[0], str(binary))
+                self.assertEqual(args[-1], 'https://www.zhipin.com/')
+                child_env = spawn.call_args_list[0].kwargs['env']
+                self.assertEqual(child_env['BOSSHUNTER_CHROME_PORTS'], '9222')
+                self.assertEqual(child_env['BOSSHUNTER_CHROME_PORT_STRICT'], 'true')
+                self.assertIn('--user-data-dir=' + str(base / 'cloakbrowser-profile'), args)
+                self.assertTrue(any(arg.startswith('--fingerprint=') for arg in args))
+                self.assertNotIn('--no-sandbox', args)
+                self.assertEqual(spawn.call_count, 4)
+                chrome.assert_not_called()
+                saved = load_config(base / 'config.yaml')['browser']
+                self.assertEqual(saved['recruiting_browser_kind'], 'cloakbrowser')
+                self.assertEqual(saved['chrome_ports'], [9222])
+                self.assertEqual(saved['cloakbrowser_executable'], str(binary))
+                controller.stop()
+            job.close.assert_called_once()
+            for process in processes:
+                process.terminate.assert_called_once()
 
 
 class WindowsBuildArchitectureTests(TestCase):

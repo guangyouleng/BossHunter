@@ -316,6 +316,17 @@ class IssueFixTests(unittest.TestCase):
         self.service.store.recover_outbox()
         self.assertEqual(self.service.store.row('outbox', draft['id'])['status'], 'uncertain')
 
+    def test_reused_windows_pid_does_not_leave_old_sender_permanently_running(self):
+        draft = self.service.prepare_reply(self.cid, '合成进程恢复测试')
+        self.service.store.claim(draft['id'])
+        with self.service.store.db() as db:
+            db.execute("UPDATE outbox SET owner=? WHERE id=?", ('1234:w7:former-process', draft['id']))
+        def alive(pid, expected_birth=None):
+            return expected_birth in (None, 8)  # PID 1234 now belongs to a newer process.
+        with patch('bosshunter.recruiting.process_state.process_alive', side_effect=alive):
+            self.service.store.recover_outbox()
+        self.assertEqual(self.service.store.row('outbox', draft['id'])['status'], 'uncertain')
+
     def test_cancelled_pending_reply_is_not_regenerated(self):
         draft = self.service.prepare_reply(self.cid, '人工放弃的回复')
         self.service.store.set_setting('reply_work:' + self.cid, {'status': 'drafted', 'draft_id': draft['id']})

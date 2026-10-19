@@ -7,6 +7,7 @@ const labels: Record<string, string> = {
   job_option_missing: '未找到目标岗位选项', job_identity_changed: '岗位身份已变化',
   recommend_frame_missing: '未找到推荐页内容', dom_structure_changed: '页面结构无法识别',
   account_mismatch: '登录账号不一致', account_paused: '账号需要人工处理',
+  platform_rejected: '平台未接受请求',
   greeting_uncertain: '招呼结果待人工核实',
   browser_operation_failed: '浏览器操作中断', browser_unavailable: '浏览器操作未完成',
 }

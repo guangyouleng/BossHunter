@@ -90,7 +90,7 @@ try {
     if (-not (Test-Path (Join-Path $Frontend 'dist\index.html'))) {
         throw 'Frontend build did not produce dist\index.html; cannot install the Python project.'
     }
-    Run $BuildPython @('-m', 'pip', 'install', "${Root}[recruiting,ocr,pdf]")
+    Run $BuildPython @('-m', 'pip', 'install', "${Root}[recruiting,cloakbrowser,ocr,pdf]")
     # Native wheels must work before freezing; PE architecture alone is not enough.
     Run $BuildPython @($Support, '--check-native')
 

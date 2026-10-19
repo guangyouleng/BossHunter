@@ -14,7 +14,7 @@ from unittest.mock import patch
 import browser_cookie3
 from Cryptodome.Cipher import AES
 
-from bosshunter.recruiting.browser import AccountPauseError
+from bosshunter.recruiting.browser import AccountPauseError, BrowserError
 from bosshunter.recruiting.local_session import LocalBossSession
 
 
@@ -55,9 +55,18 @@ class ThreadCom:
 class CookieProfileTests(TestCase):
     def setUp(self):
         self.com = ThreadCom()
-        self.com_modules = patch.dict(sys.modules, {'pythoncom': self.com})
-        self.com_modules.start()
-        self.addCleanup(self.com_modules.stop)
+        # Restore only this stub. patch.dict(sys.modules) also removes unrelated
+        # modules imported during a test; removing lazy AES-GCM modules leaves
+        # their native CFFI declarations alive and breaks the next decrypt test.
+        missing = object()
+        previous = sys.modules.get('pythoncom', missing)
+        sys.modules['pythoncom'] = self.com
+        def restore_com():
+            if previous is missing:
+                sys.modules.pop('pythoncom', None)
+            else:
+                sys.modules['pythoncom'] = previous
+        self.addCleanup(restore_com)
 
     def profile(self, root, key, network=True):
         root.mkdir(parents=True, exist_ok=True)
@@ -102,6 +111,31 @@ class CookieProfileTests(TestCase):
             with patch('bosshunter.recruiting.local_session.sys.platform', 'win32'), patch('bosshunter.recruiting.local_session._default_chrome_user_data_dir', return_value=root), patch.object(browser_cookie3, '_crypt_unprotect_data', side_effect=self.fake_dpapi):
                 actual = LocalBossSession().load_cookies()
             self.assertEqual([item.value for item in actual], ['synthetic-session'])
+
+    def test_cloak_windows_uses_chromium_key_and_can_read_after_browser_exit(self):
+        with TemporaryDirectory() as folder:
+            root = Path(folder) / 'cloakbrowser-profile'
+            self.profile(root, b'C' * 32)
+            with patch('bosshunter.recruiting.local_session.sys.platform', 'win32'), patch.object(browser_cookie3, '_crypt_unprotect_data', side_effect=self.fake_dpapi), patch.object(browser_cookie3, 'chrome') as chrome:
+                actual = LocalBossSession(user_data_dir=str(root), browser_kind='cloakbrowser').load_cookies()
+            self.assertEqual([item.value for item in actual], ['synthetic-session'])
+            chrome.assert_not_called()
+
+    def test_cloak_missing_profile_never_reads_default_chrome(self):
+        with patch('bosshunter.recruiting.local_session._default_chrome_user_data_dir') as default:
+            with self.assertRaisesRegex(BrowserError, '未配置'):
+                LocalBossSession(browser_kind='cloakbrowser').load_cookies()
+        default.assert_not_called()
+
+    def test_cloak_decryption_failure_is_labelled_and_does_not_try_chrome(self):
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.profile(root, b'C' * 32)
+            with patch('bosshunter.recruiting.local_session.sys.platform', 'win32'), patch.object(browser_cookie3, 'chromium', side_effect=ValueError('private cookie')), patch.object(browser_cookie3, 'chrome') as chrome:
+                with self.assertRaisesRegex(AccountPauseError, 'CloakBrowser') as caught:
+                    LocalBossSession(user_data_dir=str(root), browser_kind='cloakbrowser').load_cookies()
+            chrome.assert_not_called()
+            self.assertNotIn('private cookie', str(caught.exception))
 
     def test_missing_independent_local_state_never_falls_back_to_another_profile(self):
         with TemporaryDirectory() as folder:

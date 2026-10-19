@@ -7,6 +7,10 @@
 
 当前招聘端版本：**2.4.2** · 本地试运行。浏览器状态核验与诊断说明见 [招聘端浏览器操作](docs/RECRUITING_BROWSER.md)。
 
+Windows 安装版可在启动器中选择 Google Chrome 或自行获取的 CloakBrowser，分别保留登录资料；使用与下载说明见 [Windows 启动器](packaging/windows/README.md#使用者操作)。
+
+CloakBrowser 模式对打招呼、岗位选择、联系人滚动和普通回复发送启用拟人交互；回复逐字输入，不模拟打错或删改。Chrome 行为及现有节流保持原状。详细范围与验证说明见 [招聘端浏览器操作](docs/RECRUITING_BROWSER.md)。
+
 <p align="center">
   面向招聘方的面试前工作 Agent：围绕岗位找人、候选人沟通、简历评估和面试安排，减少重复操作。
 </p>
@@ -110,21 +114,23 @@ flowchart TD
 
 需要 Python 3.10+、Node.js 22+、Google Chrome，以及用于评分和回复的模型 API。
 
-**当前本地 Cookie 读取实现针对 macOS 的 Chrome 默认配置目录。Windows、Linux 及其他 Chrome 配置目录尚未适配这条招聘读取路径。** 下列命令以 macOS 为例。
+下列命令以 macOS 源码运行为例。独立浏览器目录需显式配置 `browser.recruiting_user_data_dir`；Windows 安装版由启动器配置，见 [Windows 使用说明](packaging/windows/README.md#使用者操作)。Mac 上测试 CloakBrowser 见 [本地启动步骤](docs/LOCAL_CLOAK_MACOS.md)。
 
 ```bash
 # 获取招聘端分支
 git clone --branch recruiting-agent https://github.com/XXm222/BossHunter.git
 cd BossHunter
 
-# 创建 Python 环境并安装招聘依赖
+# 创建 Python 环境
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[recruiting]'
 
 # 安装并构建前端
 npm --prefix src/bosshunter/web/frontend ci
 npm --prefix src/bosshunter/web/frontend run build
+
+# 前端 dist 就绪后安装招聘依赖
+python -m pip install -e '.[recruiting]'
 
 # 启动本地服务
 bosshunter web --no-open
@@ -142,7 +148,7 @@ bosshunter web --no-open
 
 ### 主动打招呼的启动与停止
 
-主动打招呼通过 patchright 自动化你的真实 Chrome。Chrome 111+ 禁止在默认配置目录开启远程调试端口，需用一个独立配置目录、带调试端口启动 Chrome，并在其中登录 BOSS、打开「推荐牛人」页（`/web/chat/recommend`）：
+主动打招呼通过 CDP 操作所选浏览器。以下使用独立配置目录和调试端口启动 Chrome；在其中人工登录 BOSS，再打开「推荐牛人」页（`/web/chat/recommend`）。CloakBrowser 的启动步骤另见 [Mac 本地测试](docs/LOCAL_CLOAK_MACOS.md)。
 
 ```bash
 # 启动自动化 Chrome（独立配置目录 + 调试端口，不影响日常 Chrome）
